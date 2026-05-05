@@ -1,0 +1,5 @@
+interface:
+  display_name: "Orchestrator Observability"
+  short_description: "Review orchestrator telemetry and reports."
+  default_prompt: |
+    Analyze outputs from `orchestrator-observability` reports and recommend actionable follow-ups.

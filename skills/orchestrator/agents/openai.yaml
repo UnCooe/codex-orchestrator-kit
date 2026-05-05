@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrator"
+  short_description: "Delegate noisy Codex work to subagents."
+  default_prompt: "Use the orchestrator workflow to split heavy work into subagent tasks, collect concise findings, and verify acceptance."

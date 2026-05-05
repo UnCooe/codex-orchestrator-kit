@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Offline analyzer for orchestrator-observability telemetry."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional
+
+from session_facts import (
+    extract_facts,
+    fact_to_dict,
+    scan_observability_event_files,
+    scan_session_files,
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Analyze orchestrator-observability telemetry.")
+    parser.add_argument("--codex-home", default=str(Path.home() / ".codex"), help="Path to CODEX home")
+    parser.add_argument("--since-days", type=int, default=14, help="Window in days for event filtering")
+    parser.add_argument("--report-id", default=None, help="Optional report filename suffix")
+    parser.add_argument(
+        "--reports-dir",
+        default=None,
+        help="Optional custom reports directory (defaults under CODEX_HOME/orchestrator-observability/reports)",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=20,
+        help="Maximum sample events for reports",
+    )
+    parser.add_argument(
+        "--include-paths",
+        action="store_true",
+        help="Include full local codex_home/cwd paths in JSON and Markdown reports. Default redacts paths.",
+    )
+    return parser.parse_args()
+
+
+def _project_name(cwd: str) -> str:
+    if not cwd or cwd == "unknown":
+        return "unknown"
+    try:
+        return Path(cwd).name
+    except Exception:
+        return cwd
+
+
+def _cwd_label(cwd: str, include_paths: bool) -> str:
+    if include_paths:
+        return cwd
+    project = _project_name(cwd)
+    if project == "unknown":
+        return "unknown"
+    return f"project:{project}"
+
+
+def _date_bucket(timestamp: Optional[str]) -> str:
+    if not timestamp:
+        return "unknown"
+    if "T" not in timestamp:
+        return timestamp
+    return timestamp.split("T", 1)[0]
+
+
+def _build_suggestions(
+    totals: Dict[str, int],
+    acceptance: Dict[str, int],
+    noise: Dict[str, int],
+    subagents: Dict[str, int],
+    event_breakdown: Dict[str, int],
+    sessions_seen: int,
+) -> List[str]:
+    suggestions: List[str] = []
+    blocked = totals.get("blocked_orchestrator_events", 0)
+    orchestrator_total = totals.get("orchestrator_events", 0)
+
+    if orchestrator_total and blocked >= max(1, orchestrator_total // 5):
+        suggestions.append("Consider reviewing matcher coverage for frequently blocked orchestrator hooks.")
+    if acceptance.get("work_done_missing_verification", 0) > 0:
+        suggestions.append("Require explicit verification in final assistant messages before Stop.")
+    if acceptance.get("work_done_missing_subagent_status", 0) > 0:
+        suggestions.append("Require subagent lifecycle status in final assistant messages when subagents were used.")
+    if subagents.get("lifecycle_delta_spawn_minus_close", 0) > 0:
+        suggestions.append("Spawned subagents exceed closes; check for missing close messages.")
+    if noise.get("large_tool_outputs", 0) > 0:
+        suggestions.append("Reduce large tool outputs by enabling summaries or truncation.")
+    if event_breakdown.get("transcript_message_assistant", 0) > 0 and sessions_seen == 0:
+        suggestions.append("Assistants are visible but no sessions were detected; verify session id extraction.")
+    if not suggestions:
+        suggestions.append("No critical suggestions generated from the selected window.")
+
+    return suggestions
+
+
+def _append_daily_summary(markdown_lines: List[str], daily: Dict[str, int], since_days: int) -> None:
+    markdown_lines.append(f"## Daily activity ({since_days}-day-friendly summary)")
+    if not daily:
+        markdown_lines.append("- No daily events in window.")
+        return
+
+    for date, count in sorted(daily.items(), reverse=True):
+        markdown_lines.append(f"- {date}: {count}")
+
+
+def build_report(
+    codex_home: Path,
+    since_days: int,
+    report_id: Optional[str],
+    max_samples: int,
+    reports_dir: Optional[str],
+    include_paths: bool = False,
+) -> Dict:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=since_days)
+
+    event_files = list(scan_session_files(codex_home)) + list(scan_observability_event_files(codex_home))
+    facts, fact_stats = extract_facts(event_files, codex_home, cutoff)
+
+    totals = defaultdict(int, fact_stats)
+    event_breakdown: Dict[str, Dict[str, int]] = defaultdict(lambda: {"total": 0, "blocked": 0, "allowed": 0})
+    transcript_breakdown: Dict[str, int] = defaultdict(int)
+    subagents = Counter()
+    tool_calls = Counter()
+    acceptance = Counter()
+    noise = Counter()
+    token_snapshots: List[Dict] = []
+    sessions = set()
+    samples: List[Dict] = []
+    projects = Counter()
+    cwd_activity = Counter()
+    daily_activity = defaultdict(int)
+
+    for row in facts:
+        row_dict = row if isinstance(row, dict) else row.__dict__
+        totals["total_lines"] += 1
+        if row_dict.get("session_id"):
+            sessions.add(str(row_dict["session_id"]))
+
+        event_type = row_dict["event_type"]
+        project = _project_name(row_dict["cwd"])
+        projects[project] += 1
+        cwd_key = _cwd_label(str(row_dict["cwd"] or "unknown"), include_paths)
+        cwd_activity[cwd_key] += 1
+        daily_activity[_date_bucket(row_dict["timestamp"])] += 1
+
+        if event_type.startswith("orchestrator_"):
+            totals["orchestrator_events"] += 1
+            status = str(row_dict.get("status", "unknown")).lower()
+            bucket = event_breakdown[event_type]
+            bucket["total"] += 1
+            if status == "blocked":
+                bucket["blocked"] += 1
+                totals["blocked_orchestrator_events"] += 1
+            elif status in {"allow", "ok", "pass", "warn"}:
+                bucket["allowed"] += 1
+            if len(samples) < max_samples:
+                samples.append(
+                    {
+                        "file": row_dict["source_file"],
+                        "line": row_dict["source_line"],
+                        "kind": event_type,
+                        "status": status,
+                        "created_at": row_dict["timestamp"],
+                        "project": project,
+                    }
+                )
+            continue
+
+        totals["transcript_events"] += 1
+        transcript_breakdown[event_type] += 1
+
+        if event_type.startswith("transcript_subagent_"):
+            subagents[event_type.replace("transcript_subagent_", "")] += 1
+        if event_type in {"transcript_function_call", "transcript_custom_tool_call"}:
+            tool_calls[str(row_dict.get("tool_name") or "unknown")] += 1
+        if event_type in {"transcript_function_call_output", "transcript_custom_tool_output"}:
+            output_len = int(row_dict.get("output_length", 0) or 0)
+            if output_len >= 60000:
+                noise["large_tool_outputs"] += 1
+                if event_type == "transcript_function_call_output":
+                    noise["large_function_outputs"] += 1
+                else:
+                    noise["large_custom_tool_outputs"] += 1
+        if event_type == "transcript_token_count":
+            totals["token_count_events"] += 1
+            token_count = int(row_dict.get("token_count", 0) or 0)
+            if token_count > totals.get("token_count_max", 0):
+                totals["token_count_max"] = token_count
+            if len(token_snapshots) < max_samples:
+                token_snapshots.append(
+                    {
+                        "token_count": row_dict.get("token_count"),
+                        "file": row_dict["source_file"],
+                        "line": row_dict["source_line"],
+                    }
+                )
+        if event_type == "transcript_reasoning":
+            totals["reasoning_events"] += 1
+        if event_type == "transcript_message_assistant":
+            if row_dict.get("assistant_work_done", False):
+                acceptance["work_done_messages"] += 1
+            if row_dict.get("assistant_work_done", False) and not row_dict.get("assistant_has_verification", False):
+                acceptance["work_done_missing_verification"] += 1
+            if row_dict.get("assistant_work_done", False) and not row_dict.get("assistant_has_subagent_status", False):
+                acceptance["work_done_missing_subagent_status"] += 1
+
+        if len(samples) < max_samples:
+            samples.append(
+                {
+                    "file": row_dict["source_file"],
+                    "line": row_dict["source_line"],
+                    "kind": event_type,
+                    "status": row_dict.get("status", "unknown"),
+                    "created_at": row_dict["timestamp"],
+                    "project": project,
+                }
+            )
+
+    subagents["lifecycle_delta_spawn_minus_close"] = subagents.get("spawn_agent", 0) - subagents.get("close_agent", 0)
+
+    if not report_id:
+        report_id = now.strftime("%Y%m%dT%H%M%SZ")
+
+    reports_root = Path(reports_dir) if reports_dir else (codex_home / "orchestrator-observability" / "reports")
+    reports_root.mkdir(parents=True, exist_ok=True)
+    facts_for_report = []
+    for fact in facts:
+        row = fact_to_dict(fact)
+        row["cwd"] = _cwd_label(str(row.get("cwd") or "unknown"), include_paths)
+        facts_for_report.append(row)
+
+    data = {
+        "generated_at": now.isoformat().replace("+00:00", "Z"),
+        "codex_home": str(codex_home) if include_paths else "[redacted]",
+        "since_days": since_days,
+        "paths_included": include_paths,
+        "fact_count": len(facts),
+        "window": {
+            "from": cutoff.isoformat().replace("+00:00", "Z"),
+            "to": now.isoformat().replace("+00:00", "Z"),
+        },
+        "totals": dict(totals),
+        "sessions_seen": len(sessions),
+        "projects": dict(projects),
+        "cwds": dict(cwd_activity),
+        "daily_activity": dict(daily_activity),
+        "orchestrator_event_breakdown": {k: v for k, v in event_breakdown.items()},
+        "transcript_breakdown": dict(transcript_breakdown),
+        "subagents": dict(subagents),
+        "tool_calls": dict(tool_calls),
+        "acceptance": dict(acceptance),
+        "noise": dict(noise),
+        "token_snapshots": token_snapshots,
+        "samples": samples,
+        "facts": facts_for_report,
+    }
+    data["suggestions"] = _build_suggestions(
+        data["totals"],
+        data["acceptance"],
+        data["noise"],
+        data["subagents"],
+        dict(transcript_breakdown),
+        data["sessions_seen"],
+    )
+
+    json_path = reports_root / f"orchestrator-observability-{report_id}.json"
+    with json_path.open("w", encoding="utf-8") as stream:
+        json.dump(data, stream, indent=2, ensure_ascii=False)
+
+    markdown_lines = [
+        "# Orchestrator Observability Report",
+        "",
+        f"- Scope: {codex_home if include_paths else '[redacted]'}",
+        f"- Window: last {since_days} day(s)",
+        f"- Report time: {data['generated_at']}",
+        "",
+        f"- Total lines: {totals.get('total_lines', 0)}",
+        f"- Filtered as older: {totals.get('filtered_older', 0)}",
+        f"- Invalid lines: {totals.get('invalid_lines', 0)}",
+        f"- Orchestrator events: {totals.get('orchestrator_events', 0)}",
+        f"- Transcript events: {totals.get('transcript_events', 0)}",
+        f"- Sessions seen: {len(sessions)}",
+        f"- Projects seen: {len(projects)}",
+        f"- Subagent spawn/wait/close: {subagents.get('spawn_agent', 0)}/{subagents.get('wait_agent', 0)}/{subagents.get('close_agent', 0)}",
+        f"- Subagent lifecycle delta: {subagents.get('lifecycle_delta_spawn_minus_close', 0)}",
+        f"- Large tool outputs: {noise.get('large_tool_outputs', 0)}",
+        "",
+        "## Orchestrator events",
+    ]
+
+    for name, values in sorted(event_breakdown.items()):
+        markdown_lines.append(
+            f"- `{name}`: total={values.get('total', 0)}, blocked={values.get('blocked', 0)}, allowed={values.get('allowed', 0)}"
+        )
+
+    markdown_lines.append("")
+    markdown_lines.append("## Transcript events")
+    for name, value in sorted(transcript_breakdown.items()):
+        markdown_lines.append(f"- {name}: {value}")
+
+    markdown_lines.append("")
+    markdown_lines.append("## Tool calls")
+    for name, value in tool_calls.most_common():
+        markdown_lines.append(f"- `{name}`: {value}")
+
+    markdown_lines.append("")
+    markdown_lines.append("## Acceptance signals")
+    for name, value in sorted(acceptance.items()):
+        markdown_lines.append(f"- {name}: {value}")
+
+    markdown_lines.append("")
+    markdown_lines.append("## Project & CWD activity")
+    for name, value in sorted(projects.items(), key=lambda item: item[1], reverse=True):
+        markdown_lines.append(f"- {name}: {value}")
+
+    if since_days <= 3:
+        markdown_lines.append("")
+        _append_daily_summary(markdown_lines, dict(daily_activity), since_days)
+
+    markdown_lines.append("")
+    markdown_lines.append("## Suggestions")
+    for suggestion in data["suggestions"]:
+        markdown_lines.append(f"- {suggestion}")
+
+    if samples:
+        markdown_lines.append("")
+        markdown_lines.append("## Samples")
+        for sample in samples:
+            markdown_lines.append(f"- {sample['created_at']} ({sample['kind']}): {sample['status']} in {sample['project']}")
+
+    md_path = reports_root / f"orchestrator-observability-{report_id}.md"
+    md_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
+
+    return {
+        "json_report": str(json_path),
+        "markdown_report": str(md_path),
+        "totals": dict(totals),
+        "orchestrator_event_breakdown": {k: v for k, v in event_breakdown.items()},
+        "subagents": dict(subagents),
+        "acceptance": dict(acceptance),
+        "noise": dict(noise),
+    }
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    output = build_report(
+        Path(args.codex_home).expanduser(),
+        args.since_days,
+        args.report_id,
+        args.max_samples,
+        args.reports_dir,
+        args.include_paths,
+    )
+    print(json.dumps(output, indent=2, ensure_ascii=False))

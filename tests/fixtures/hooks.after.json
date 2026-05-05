@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python /tmp/.codex/hooks/orchestrator_user_prompt.py",
+            "timeout": 10,
+            "statusMessage": "Checking orchestration policy"
+          }
+        ]
+      }
+    ]
+  }
+}

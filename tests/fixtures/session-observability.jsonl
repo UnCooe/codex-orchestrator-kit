@@ -1,0 +1,13 @@
+{"payload":{"type":"message","role":"user","content":"please implement a feature"},"session_id":"smoke-session-1","cwd":"C:/repo/acme-tooling","timestamp":"2026-05-02T00:00:00Z"}
+{"payload":{"type":"function_call","name":"spawn_agent","arguments":"{\"agent_type\":\"implementer\"}"},"session_id":"smoke-session-1","cwd":"C:/repo/acme-tooling","timestamp":"2026-05-02T00:00:01Z"}
+{"payload":{"type":"function_call","name":"wait_agent","arguments":"{}"},"session_id":"smoke-session-2","cwd":"D:/repo/acme-tooling","timestamp":"2026-05-02T00:00:02Z"}
+{"payload":{"type":"function_call","name":"close_agent","arguments":"{}"},"session_id":"smoke-session-2","cwd":"D:/repo/acme-tooling","timestamp":"2026-05-02T00:00:03Z"}
+{"payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"rg --files\"}"},"session_id":"smoke-session-1","cwd":"C:/repo/acme-tooling","timestamp":"2026-05-02T00:00:04Z"}
+{"payload":{"type":"function_call_output","output":"short output"},"session_id":"smoke-session-1","cwd":"C:/repo/acme-tooling","timestamp":"2026-05-02T00:00:05Z"}
+{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10000,"output_tokens":2345,"total_tokens":12345},"last_token_usage":{"total_tokens":2345}}},"session_id":"smoke-session-2","cwd":"D:/repo/acme-tooling","timestamp":"2026-05-02T00:00:06Z"}
+{"payload":{"type":"reasoning","summary":[{"text":"short reasoning summary"}]},"session_id":"smoke-session-3","cwd":"C:/repo/acme-web","timestamp":"2026-05-02T00:00:07Z"}
+{"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"implemented the requested change and updated files. Done."}]},"session_id":"smoke-session-3","cwd":"C:/repo/acme-web","timestamp":"2026-05-02T00:00:08Z"}
+{"event":"orchestrator_observability","event_name":"pre_tool_use","status":"blocked","created_at":"2026-05-02T00:00:20Z","reason":"broad scan","session_id":"smoke-session-1","cwd":"C:/repo/acme-tooling"}
+{"event":"orchestrator_observability","event_name":"post_tool_use","status":"allow","created_at":"2026-05-02T00:00:30Z","reason":"output summary","session_id":"smoke-session-2","cwd":"D:/repo/acme-tooling"}
+{"event":"orchestrator_observability","event_name":"user_prompt","status":"warn","created_at":"2026-05-02T00:00:40Z","reason":"heavy prompt","session_id":"smoke-session-3","cwd":"C:/repo/acme-web"}
+not-json
