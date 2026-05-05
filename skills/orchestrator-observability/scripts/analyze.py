@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -68,6 +69,47 @@ def _date_bucket(timestamp: Optional[str]) -> str:
     return timestamp.split("T", 1)[0]
 
 
+_CONTEXT_SECRET_RE = re.compile(
+    r"(?i)(api[-_]?(?:key|token)|token|secret|password|bearer)\s*[:=]\s*([^\s,;]+)"
+)
+_OPENAI_KEY_RE = re.compile(r"(?i)\bsk-[A-Za-z0-9]{20,}\b")
+
+
+def _redact_context(text: str) -> str:
+    redacted = _CONTEXT_SECRET_RE.sub(r"\1=[redacted]", text)
+    return _OPENAI_KEY_RE.sub("[redacted]", redacted)
+
+
+def _project_context_summary(cwd: str, include_paths: bool) -> Dict[str, object]:
+    if not cwd or cwd == "unknown":
+        return {"available": False, "source": "", "summary": ""}
+
+    try:
+        root = Path(cwd)
+    except Exception:
+        return {"available": False, "source": "invalid_cwd", "summary": ""}
+
+    source = str(root / ".codex" / "project-context.md").replace("\\", "/")
+    display_source = source if include_paths else "project/.codex/project-context.md"
+    if not include_paths and root.name:
+        display_source = f"project:{root.name}/.codex/project-context.md"
+
+    if not (root / ".codex" / "project-context.md").exists():
+        return {"available": False, "source": display_source, "summary": ""}
+
+    try:
+        text = (root / ".codex" / "project-context.md").read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return {"available": False, "source": display_source, "summary": ""}
+
+    normalized = " ".join(_redact_context(text).strip().replace("\r", "").replace("\n", " ").split())
+    if not normalized:
+        return {"available": True, "source": display_source, "summary": ""}
+    if len(normalized) > 240:
+        normalized = normalized[:237] + "..."
+    return {"available": True, "source": display_source, "summary": normalized}
+
+
 def _build_suggestions(
     totals: Dict[str, int],
     acceptance: Dict[str, int],
@@ -86,6 +128,8 @@ def _build_suggestions(
         suggestions.append("Require explicit verification in final assistant messages before Stop.")
     if acceptance.get("work_done_missing_subagent_status", 0) > 0:
         suggestions.append("Require subagent lifecycle status in final assistant messages when subagents were used.")
+    if acceptance.get("structured_acceptance_missing_verification", 0) > 0:
+        suggestions.append("Structured acceptance from stop hook reports verification was requested but not present.")
     if subagents.get("lifecycle_delta_spawn_minus_close", 0) > 0:
         suggestions.append("Spawned subagents exceed closes; check for missing close messages.")
     if noise.get("large_tool_outputs", 0) > 0:
@@ -119,7 +163,7 @@ def build_report(
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=since_days)
 
-    event_files = list(scan_session_files(codex_home)) + list(scan_observability_event_files(codex_home))
+    event_files = list(scan_session_files(codex_home, cutoff=cutoff)) + list(scan_observability_event_files(codex_home))
     facts, fact_stats = extract_facts(event_files, codex_home, cutoff)
 
     totals = defaultdict(int, fact_stats)
@@ -128,6 +172,7 @@ def build_report(
     subagents = Counter()
     tool_calls = Counter()
     acceptance = Counter()
+    structured_acceptance = Counter()
     noise = Counter()
     token_snapshots: List[Dict] = []
     sessions = set()
@@ -135,6 +180,13 @@ def build_report(
     projects = Counter()
     cwd_activity = Counter()
     daily_activity = defaultdict(int)
+    project_context = {}
+    tool_surface = {
+        "families": Counter(),
+        "normalized_tool_names": Counter(),
+        "events_with_input_length": 0,
+        "events_with_output_length": 0,
+    }
 
     for row in facts:
         row_dict = row if isinstance(row, dict) else row.__dict__
@@ -148,6 +200,27 @@ def build_report(
         cwd_key = _cwd_label(str(row_dict["cwd"] or "unknown"), include_paths)
         cwd_activity[cwd_key] += 1
         daily_activity[_date_bucket(row_dict["timestamp"])] += 1
+        if cwd_key not in project_context and row_dict["cwd"]:
+            project_context[cwd_key] = _project_context_summary(str(row_dict["cwd"]), include_paths)
+        if row_dict.get("tool_family"):
+            tool_surface["families"][str(row_dict.get("tool_family"))] += 1
+        if row_dict.get("normalized_tool_name"):
+            tool_surface["normalized_tool_names"][str(row_dict.get("normalized_tool_name"))] += 1
+        if int(row_dict.get("input_length", 0) or 0) > 0:
+            tool_surface["events_with_input_length"] += 1
+        if int(row_dict.get("output_length", 0) or 0) > 0:
+            tool_surface["events_with_output_length"] += 1
+        structured = fact_to_dict(row).get("acceptance", {}) if not isinstance(row, dict) else row_dict.get("acceptance", {})
+        if isinstance(structured, dict) and structured.get("source"):
+            structured_acceptance[f"source_{structured.get('source')}"] += 1
+            if structured.get("has_work_done_signal"):
+                structured_acceptance["work_done_signals"] += 1
+            if structured.get("source") == "structured" and structured.get("has_verification_signal"):
+                structured_acceptance["structured_acceptance_verified"] += 1
+            if structured.get("has_work_done_signal") and not structured.get("has_verification_signal"):
+                structured_acceptance["structured_acceptance_missing_verification"] += 1
+            if structured.get("has_subagent_signal"):
+                structured_acceptance["subagent_signals"] += 1
 
         if event_type.startswith("orchestrator_"):
             totals["orchestrator_events"] += 1
@@ -178,7 +251,7 @@ def build_report(
         if event_type.startswith("transcript_subagent_"):
             subagents[event_type.replace("transcript_subagent_", "")] += 1
         if event_type in {"transcript_function_call", "transcript_custom_tool_call"}:
-            tool_calls[str(row_dict.get("tool_name") or "unknown")] += 1
+            tool_calls[str(row_dict.get("normalized_tool_name") or row_dict.get("tool_name") or "unknown")] += 1
         if event_type in {"transcript_function_call_output", "transcript_custom_tool_output"}:
             output_len = int(row_dict.get("output_length", 0) or 0)
             if output_len >= 60000:
@@ -209,7 +282,6 @@ def build_report(
                 acceptance["work_done_missing_verification"] += 1
             if row_dict.get("assistant_work_done", False) and not row_dict.get("assistant_has_subagent_status", False):
                 acceptance["work_done_missing_subagent_status"] += 1
-
         if len(samples) < max_samples:
             samples.append(
                 {
@@ -223,6 +295,9 @@ def build_report(
             )
 
     subagents["lifecycle_delta_spawn_minus_close"] = subagents.get("spawn_agent", 0) - subagents.get("close_agent", 0)
+    acceptance["structured_acceptance_missing_verification"] = int(
+        structured_acceptance.get("structured_acceptance_missing_verification", 0)
+    )
 
     if not report_id:
         report_id = now.strftime("%Y%m%dT%H%M%SZ")
@@ -254,8 +329,16 @@ def build_report(
         "transcript_breakdown": dict(transcript_breakdown),
         "subagents": dict(subagents),
         "tool_calls": dict(tool_calls),
+        "tool_surface": {
+            "families": dict(tool_surface["families"]),
+            "normalized_tool_names": dict(tool_surface["normalized_tool_names"]),
+            "events_with_input_length": tool_surface["events_with_input_length"],
+            "events_with_output_length": tool_surface["events_with_output_length"],
+        },
         "acceptance": dict(acceptance),
+        "structured_acceptance": dict(structured_acceptance),
         "noise": dict(noise),
+        "project_context": project_context,
         "token_snapshots": token_snapshots,
         "samples": samples,
         "facts": facts_for_report,
@@ -310,9 +393,31 @@ def build_report(
         markdown_lines.append(f"- `{name}`: {value}")
 
     markdown_lines.append("")
+    markdown_lines.append("## Tool surface")
+    for name, value in tool_surface["families"].most_common():
+        markdown_lines.append(f"- family `{name}`: {value}")
+
+    markdown_lines.append("")
     markdown_lines.append("## Acceptance signals")
     for name, value in sorted(acceptance.items()):
         markdown_lines.append(f"- {name}: {value}")
+    if structured_acceptance:
+        markdown_lines.append("")
+        markdown_lines.append("## Structured acceptance signals")
+        for name, value in sorted(structured_acceptance.items()):
+            markdown_lines.append(f"- {name}: {value}")
+
+    markdown_lines.append("")
+    markdown_lines.append("## Project context")
+    if project_context:
+        for key in sorted(project_context):
+            item = project_context[key]
+            if not isinstance(item, dict):
+                continue
+            if item.get("available"):
+                markdown_lines.append(f"- {key}: available ({item.get('source', '')})")
+            else:
+                markdown_lines.append(f"- {key}: unavailable")
 
     markdown_lines.append("")
     markdown_lines.append("## Project & CWD activity")

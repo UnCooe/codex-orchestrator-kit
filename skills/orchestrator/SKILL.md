@@ -87,3 +87,10 @@ Before final response:
 - include `Subagents: closed` or `Subagents: retained because ...`
 - call out remaining assumptions, risks, or rollback notes
 - close unused subagents when the workflow is complete
+- Include a compact acceptance footer with:
+  - `verification_status`
+  - `review_status`
+  - `subagent_status`
+  - `risk_status`
+  Example:
+  `verification_status=pass; review_status=pass; subagent_status=closed; risk_status=low`

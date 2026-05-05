@@ -244,6 +244,7 @@ PY
 
 copy_sources "$SCRIPT_DIR/skills/orchestrator" "$AGENTS_TARGET/skills/orchestrator"
 copy_sources "$SCRIPT_DIR/skills/orchestrator-observability" "$AGENTS_TARGET/skills/orchestrator-observability"
+copy_sources "$SCRIPT_DIR/skills/turnstate-observability" "$AGENTS_TARGET/skills/turnstate-observability"
 copy_sources "$SCRIPT_DIR/hooks" "$CODEX_TARGET/hooks"
 copy_sources "$SCRIPT_DIR/agents" "$CODEX_TARGET/agents"
 

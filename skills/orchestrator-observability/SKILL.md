@@ -11,7 +11,8 @@ Use this skill to inspect compact observability events and Codex session JSONL w
 
 1. Run the analyzer with a concrete Codex home and time window.
 2. Run triage on the generated JSON report when deciding whether the user should be interrupted.
-3. Read the generated Markdown summary first.
+3. Run the subagent workflow report when validating heavy-work delegation behavior.
+4. Read the generated Markdown summary first.
 4. Use the JSON report only for exact counts or automation outputs.
 5. Recommend changes as a patch list; do not directly change live workflow files unless the user asks.
 
@@ -28,6 +29,25 @@ python "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrator-observability/scripts/
 ```
 
 Reports are written under `CODEX_HOME/orchestrator-observability/reports/`.
+
+Subagent workflow report is also available and written under:
+
+- `$env:CODEX_HOME\orchestrator-observability\reports\subagent-workflow-<timestamp>.json`
+- `$env:CODEX_HOME\orchestrator-observability\reports\subagent-workflow-<timestamp>.md`
+
+PowerShell:
+
+```powershell
+python "$env:AGENTS_HOME\skills\orchestrator-observability\scripts\subagent_workflow.py" --codex-home "$env:CODEX_HOME" --since-days 7
+```
+
+Bash:
+
+```bash
+python "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrator-observability/scripts/subagent_workflow.py" --codex-home "${CODEX_HOME:-$HOME/.codex}" --since-days 7
+```
+
+Use this report for subagent delegation-rate, spawn/wait/close balance, unclosed delta, heavy-work delegation signals, and broad-scan bypass observability.
 
 Triage:
 

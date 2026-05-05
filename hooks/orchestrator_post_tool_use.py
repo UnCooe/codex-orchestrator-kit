@@ -3,7 +3,12 @@ import json
 import sys
 from pathlib import Path
 
-from orchestrator_observability import emit_observability_event
+from orchestrator_observability import (
+    emit_observability_event,
+    normalize_tool_family,
+    normalize_tool_name,
+    text_length,
+)
 
 
 DELEGATION_MARKERS = [
@@ -40,24 +45,27 @@ def has_delegation_signal(transcript_path: str | None) -> bool:
 
 def main() -> int:
     payload = json.load(sys.stdin)
-    if str(payload.get("tool_name", "")).lower() != "bash":
-        emit_observability_event(
-            payload,
-            event_name="post_tool_use",
-            status="allow",
-            reason="non_bash_tool_call",
-            text_source=payload.get("tool_name"),
-        )
-        return 0
+    tool_name = normalize_tool_name(payload.get("tool_name"))
+    tool_family = normalize_tool_family(tool_name)
+    tool_input = payload.get("tool_input", {})
+    tool_response = payload.get("tool_response", "")
 
-    response_text = all_text(payload.get("tool_response", ""))
-    if len(response_text) < 60000 or has_delegation_signal(payload.get("transcript_path")):
+    input_length = text_length(tool_input)
+    response_text = all_text(tool_response)
+    response_length = len(response_text)
+
+    if tool_family != "shell_like" or response_length < 60000 or has_delegation_signal(payload.get("transcript_path")):
         emit_observability_event(
             payload,
             event_name="post_tool_use",
             status="allow",
-            reason="output_below_threshold_or_subagent_signal",
-            text_source=payload.get("tool_response"),
+            reason="non_shell_like_or_small_output_or_subagent_signal",
+            tool_name=tool_name,
+            tool_family=tool_family,
+            normalized_tool_name=tool_name,
+            input_length=input_length,
+            output_length=response_length,
+            text_source=tool_response,
         )
         return 0
 
@@ -82,11 +90,12 @@ def main() -> int:
         event_name="post_tool_use",
         status="blocked",
         reason="large_output_threshold_hit",
-        extra={
-            "tool_name": str(payload.get("tool_name", "")).lower(),
-            "response_length": len(response_text),
-        },
-        text_source=payload.get("tool_response"),
+        tool_name=tool_name,
+        tool_family=tool_family,
+        normalized_tool_name=tool_name,
+        input_length=input_length,
+        output_length=response_length,
+        text_source=tool_response,
     )
     return 0
 

@@ -4,7 +4,12 @@ import re
 import sys
 from pathlib import Path
 
-from orchestrator_observability import emit_observability_event
+from orchestrator_observability import (
+    emit_observability_event,
+    normalize_tool_family,
+    normalize_tool_name,
+    text_length,
+)
 
 
 DELEGATION_MARKERS = [
@@ -48,12 +53,12 @@ def is_broad_scan(command: str) -> bool:
     c = command.lower()
     broad_patterns = [
         r"\brg\s+--files\b",
-        r"\bget-childitem\b.*\b-recurse\b",
-        r"\bselect-string\b.*\b-recurse\b",
+        r"\bget-childitem\b.*(?:^|\s)-recurse\b",
+        r"\bselect-string\b.*(?:^|\s)-recurse\b",
         r"\bdir\b.*\s/s\b",
         r"\btree\b.*\s/f\b",
         r"\bls\b.*\s-r\b",
-        r"\bfind\s+\.\b",
+        r"\bfind\s+\.(?:\s|$)",
         r"\bgit\s+grep\b",
     ]
     return any(re.search(pattern, c, re.DOTALL) for pattern in broad_patterns)
@@ -65,9 +70,11 @@ def patch_file_count(patch: str) -> int:
 
 def main() -> int:
     payload = json.load(sys.stdin)
-    tool_name = str(payload.get("tool_name", "")).lower()
+    tool_name = normalize_tool_name(payload.get("tool_name"))
+    tool_family = normalize_tool_family(tool_name)
     tool_input = payload.get("tool_input", {})
     text = all_text(tool_input)
+    input_length = text_length(tool_input)
 
     if has_delegation_signal(payload.get("transcript_path")):
         emit_observability_event(
@@ -77,10 +84,13 @@ def main() -> int:
             reason="delegation_signal_detected",
             text_source=text,
             tool_name=tool_name,
+            tool_family=tool_family,
+            normalized_tool_name=tool_name,
+            input_length=input_length,
         )
         return 0
 
-    if tool_name == "bash" and is_broad_scan(text):
+    if tool_family == "shell_like" and is_broad_scan(text):
         block(
             "Broad repo scanning is noisy work. First make an orchestrator delegation decision "
             "and prefer a researcher subagent for repo mapping. If this is a tiny direct task, "
@@ -91,6 +101,9 @@ def main() -> int:
             event_name="pre_tool_use",
             status="blocked",
             reason="broad_scan_detected",
+            tool_family=tool_family,
+            normalized_tool_name=tool_name,
+            input_length=input_length,
             tool_name=tool_name,
             text_source=text,
         )
@@ -109,17 +122,23 @@ def main() -> int:
                 payload,
                 event_name="pre_tool_use",
                 status="blocked",
-            reason="large_patch_detected",
-            tool_name=tool_name,
-            text_source=text,
-        )
-        return 0
+                reason="large_patch_detected",
+                tool_family=tool_family,
+                normalized_tool_name=tool_name,
+                input_length=input_length,
+                tool_name=tool_name,
+                text_source=text,
+            )
+            return 0
 
     emit_observability_event(
         payload,
         event_name="pre_tool_use",
         status="allow",
         tool_name=tool_name,
+        tool_family=tool_family,
+        normalized_tool_name=tool_name,
+        input_length=input_length,
         text_source=text,
     )
     return 0

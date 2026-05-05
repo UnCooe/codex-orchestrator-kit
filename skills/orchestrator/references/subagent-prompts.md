@@ -12,6 +12,13 @@ Scope: [read-only or exact write scope]
 Do not: read unrelated areas, paste long logs, revert unrelated edits, invent contracts, or continue beyond scope.
 Return only: conclusion, evidence, risks, alternatives, recommended_action[, changed_files].
 Lifecycle: finish this task, then the main agent will collect the result and close this subagent unless explicitly reassigned.
+
+For stop-criterion summaries, include:
+
+`verification_status=<pass|fail|not_run>`
+`review_status=<pass|fail|not_required>`
+`subagent_status=<closed|retained because ...|none>`
+`risk_status=<low|medium|high>`
 ```
 
 ## requirements_interpreter

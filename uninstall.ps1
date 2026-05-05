@@ -82,6 +82,7 @@ $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
 $removeTargets = @(
     (Join-Path $AgentsHome 'skills\orchestrator')
     (Join-Path $AgentsHome 'skills\orchestrator-observability')
+    (Join-Path $AgentsHome 'skills\turnstate-observability')
     (Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_post_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_stop.py')

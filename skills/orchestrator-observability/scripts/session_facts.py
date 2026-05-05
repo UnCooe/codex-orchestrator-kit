@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import calendar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional
 import re
@@ -44,6 +45,29 @@ VERIFICATION_PATTERNS = [
 
 WORK_DONE_RE = [re.compile(pattern, re.IGNORECASE) for pattern in WORK_DONE_PATTERNS]
 VERIFICATION_RE = [re.compile(pattern, re.IGNORECASE) for pattern in VERIFICATION_PATTERNS]
+FILE_TIMESTAMP_PATTERNS = [
+    re.compile(r"\b(?P<ts>\d{4}-\d{2}-\d{2}T\d{6})\b"),
+    re.compile(r"\b(?P<ts>\d{4}_\d{2}_\d{2}T\d{6})\b"),
+    re.compile(r"\b(?P<ts>\d{8}T\d{6})\b"),
+    re.compile(r"\b(?P<ts>\d{4}-\d{2}-\d{2})\b"),
+    re.compile(r"\b(?P<ts>\d{4}_\d{2}_\d{2})\b"),
+    re.compile(r"\b(?P<ts>\d{8})\b"),
+]
+
+_NORMALIZED_TOOL_NAMES = {
+    "bash": "bash",
+    "sh": "bash",
+    "zsh": "bash",
+    "shell": "bash",
+    "shell_command": "shell_command",
+    "powershell": "powershell",
+    "pwsh": "powershell",
+    "command": "powershell",
+    "cmd": "powershell",
+    "spawn_agent": "spawn_agent",
+    "wait_agent": "wait_agent",
+    "close_agent": "close_agent",
+}
 
 
 def parse_timestamp(value: object) -> Optional[datetime]:
@@ -72,10 +96,96 @@ def iter_jsonl_records(paths: Iterable[Path]) -> Iterator[tuple[Path, int, Optio
                 yield path, line_no, None
 
 
-def scan_session_files(codex_home: Path) -> Iterable[Path]:
+def _end_of_day(year: int, month: int, day: int) -> Optional[datetime]:
+    try:
+        return datetime(year, month, day, time.max.hour, time.max.minute, time.max.second, time.max.microsecond, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _end_of_month(year: int, month: int) -> Optional[datetime]:
+    try:
+        last_day = calendar.monthrange(year, month)[1]
+    except calendar.IllegalMonthError:
+        return None
+    return _end_of_day(year, month, last_day)
+
+
+def _end_of_year(year: int) -> Optional[datetime]:
+    return _end_of_day(year, 12, 31)
+
+
+def _is_fixed_width_number(value: str, width: int) -> bool:
+    return len(value) == width and value.isdigit()
+
+
+def _iter_jsonl_recursive(path: Path) -> Iterator[Path]:
+    if path.is_file() and path.suffix == ".jsonl":
+        yield path
+    elif path.is_dir():
+        yield from path.glob("**/*.jsonl")
+
+
+def _iter_cutoff_session_files(sessions_root: Path, cutoff: datetime) -> Iterator[Path]:
+    for year_entry in sessions_root.iterdir():
+        if year_entry.is_file():
+            if year_entry.suffix == ".jsonl":
+                yield year_entry
+            continue
+        if not year_entry.is_dir():
+            continue
+
+        year_name = year_entry.name
+        if not _is_fixed_width_number(year_name, 4):
+            yield from _iter_jsonl_recursive(year_entry)
+            continue
+        year = int(year_name)
+        year_end = _end_of_year(year)
+        if year_end is not None and year_end < cutoff:
+            continue
+
+        for month_entry in year_entry.iterdir():
+            if month_entry.is_file():
+                if month_entry.suffix == ".jsonl":
+                    yield month_entry
+                continue
+            if not month_entry.is_dir():
+                continue
+
+            month_name = month_entry.name
+            if not _is_fixed_width_number(month_name, 2):
+                yield from _iter_jsonl_recursive(month_entry)
+                continue
+            month = int(month_name)
+            month_end = _end_of_month(year, month)
+            if month_end is not None and month_end < cutoff:
+                continue
+
+            for day_entry in month_entry.iterdir():
+                if day_entry.is_file():
+                    if day_entry.suffix == ".jsonl":
+                        yield day_entry
+                    continue
+                if not day_entry.is_dir():
+                    continue
+
+                day_name = day_entry.name
+                if not _is_fixed_width_number(day_name, 2):
+                    yield from _iter_jsonl_recursive(day_entry)
+                    continue
+                day = int(day_name)
+                day_end = _end_of_day(year, month, day)
+                if day_end is not None and day_end < cutoff:
+                    continue
+                yield from _iter_jsonl_recursive(day_entry)
+
+
+def scan_session_files(codex_home: Path, cutoff: Optional[datetime] = None) -> Iterable[Path]:
     sessions_root = codex_home / "sessions"
     if not sessions_root.exists():
         return []
+    if cutoff is not None:
+        return _iter_cutoff_session_files(sessions_root, cutoff)
     return sessions_root.glob("**/*.jsonl")
 
 
@@ -184,6 +294,32 @@ def _contains_pattern(patterns: List[re.Pattern], text: str) -> bool:
     return any(regex.search(text) for regex in patterns)
 
 
+def normalize_tool_name(tool_name: object) -> str:
+    raw = str(tool_name).strip().lower() if tool_name is not None else ""
+    if not raw:
+        return ""
+    return _NORMALIZED_TOOL_NAMES.get(raw, raw)
+
+
+def normalize_tool_family(tool_name: str) -> str:
+    normalized = normalize_tool_name(tool_name)
+    if normalized in {"bash", "powershell", "shell_command"}:
+        return "shell_like"
+    if normalized in {"spawn_agent", "wait_agent", "close_agent"}:
+        return "subagent"
+    return "generic"
+
+
+def _to_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def extract_source_file(codex_home: Path, path: Path) -> str:
     try:
         return str(path.resolve().relative_to(codex_home.resolve())).replace("\\", "/")
@@ -221,6 +357,78 @@ def _assistant_signal_flags(payload: dict) -> Dict[str, bool]:
     }
 
 
+def _parse_token_timestamp(token: str) -> Optional[datetime]:
+    formats = (
+        ("%Y%m%dT%H%M%S", False),
+        ("%Y-%m-%dT%H%M%S", False),
+        ("%Y_%m_%dT%H%M%S", False),
+        ("%Y%m%d", True),
+        ("%Y-%m-%d", True),
+        ("%Y_%m_%d", True),
+    )
+    for fmt, date_only in formats:
+        try:
+            parsed = datetime.strptime(token, fmt)
+        except ValueError:
+            continue
+        if date_only:
+            parsed = datetime.combine(parsed.date(), time.max)
+        return parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _path_timestamp_hints(path: Path) -> List[datetime]:
+    hints: List[datetime] = []
+    search_targets = [path.name, str(path)]
+    for target in search_targets:
+        for pattern in FILE_TIMESTAMP_PATTERNS:
+            for match in pattern.finditer(target):
+                parsed = _parse_token_timestamp(match.group("ts"))
+                if parsed is not None:
+                    hints.append(parsed)
+
+    parts = list(path.parts)
+    for index in range(len(parts) - 2):
+        year, month, day = parts[index:index + 3]
+        if year.isdigit() and month.isdigit() and day.isdigit() and len(year) == 4 and len(month) == 2 and len(day) == 2:
+            parsed = _parse_token_timestamp(f"{year}-{month}-{day}")
+            if parsed is not None:
+                hints.append(parsed)
+    return hints
+
+
+def _parse_path_timestamp_hint(path: Path) -> Optional[datetime]:
+    hints = _path_timestamp_hints(path)
+    if not hints:
+        return None
+    return max(hints)
+
+
+def _file_likely_outside_cutoff(path: Path, cutoff: datetime) -> bool:
+    hints = []
+    hint_ts = _parse_path_timestamp_hint(path)
+    if hint_ts is not None:
+        hints.append(hint_ts)
+    try:
+        hints.append(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc))
+    except OSError:
+        pass
+
+    if not hints:
+        return False
+    latest_hint = max(hints)
+    return latest_hint < cutoff
+
+
+def _filtered_session_paths(paths: Iterable[Path], cutoff: datetime, stats: Optional[Dict[str, int]] = None) -> Iterator[Path]:
+    for path in paths:
+        if _file_likely_outside_cutoff(path, cutoff):
+            if stats is not None:
+                stats["filtered_files"] = stats.get("filtered_files", 0) + 1
+            continue
+        yield path
+
+
 @dataclass(frozen=True)
 class SessionFact:
     timestamp: Optional[str]
@@ -228,7 +436,10 @@ class SessionFact:
     cwd: str
     event_type: str
     role: str
+    reason: str
     tool_name: str
+    normalized_tool_name: str
+    tool_family: str
     status: str
     input_length: int
     output_length: int
@@ -238,23 +449,27 @@ class SessionFact:
     assistant_work_done: bool = False
     assistant_has_verification: bool = False
     assistant_has_subagent_status: bool = False
+    acceptance_source: str = ""
+    verification_status: str = ""
+    review_status: str = ""
+    subagent_status: str = ""
+    risk_status: str = ""
+    acceptance_has_work_done_signal: bool = False
+    acceptance_has_verification_signal: bool = False
+    acceptance_has_subagent_signal: bool = False
 
 
 def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> tuple[List[SessionFact], Dict[str, int]]:
-    stats = {"invalid_lines": 0, "filtered_older": 0}
+    stats = {"invalid_lines": 0, "filtered_older": 0, "filtered_files": 0}
     facts: List[SessionFact] = []
     session_context: Dict[str, Dict[str, str]] = {}
-    for source_file, source_line, record in iter_jsonl_records(paths):
+    for source_file, source_line, record in iter_jsonl_records(_filtered_session_paths(paths, cutoff, stats)):
         source_key = str(source_file.resolve())
         if record is None:
             stats["invalid_lines"] += 1
             continue
 
         ts = parse_timestamp(record.get("created_at") or record.get("event_time") or record.get("timestamp"))
-        if ts is not None and ts < cutoff:
-            stats["filtered_older"] += 1
-            continue
-
         event_type = classify_event(record)
         payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
         if not isinstance(payload, dict):
@@ -267,17 +482,26 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
             if isinstance(payload.get("cwd"), str):
                 context["cwd"] = payload["cwd"]
 
+        if ts is not None and ts < cutoff:
+            stats["filtered_older"] += 1
+            continue
+
         context = session_context.get(source_key, {})
         status = str(record.get("status", "unknown")).lower()
         role = str(payload.get("role", ""))
         tool_name = str(payload.get("name") or payload.get("tool_name") or "")
+        normalized_tool_name = normalize_tool_name(tool_name)
+        tool_family = normalize_tool_family(normalized_tool_name)
         token_count = 0
         input_length = 0
         output_length = 0
+        event_reason = str(record.get("reason", ""))
 
         if event_type == "transcript_token_count":
             token_count = extract_token_count(payload)
         elif event_type in {"transcript_function_call", "transcript_custom_tool_call"}:
+            normalized_tool_name = normalize_tool_name(payload.get("name") or tool_name)
+            tool_family = normalize_tool_family(normalized_tool_name)
             input_length = normalize_text_length(payload.get("arguments") or payload.get("input"))
             if not input_length:
                 input_length = normalize_text_length(record.get("input"))
@@ -285,12 +509,49 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
             output_length = normalize_text_length(payload.get("output") or payload.get("result") or payload.get("content"))
         elif event_type.startswith("transcript_message_"):
             input_length = normalize_text_length(stringify_text(payload.get("content") or payload.get("message")))
+        elif event_type.startswith("orchestrator_"):
+            input_length = int(record.get("input_length", 0) or 0)
+            if not input_length:
+                input_length = normalize_text_length(record.get("reason"))
+            output_length = int(record.get("output_length", 0) or 0)
+            if not output_length:
+                output_length = int(record.get("payload_size", 0) or 0)
+            if record.get("tool_name"):
+                tool_name = str(record.get("tool_name") or "")
+                normalized_tool_name = normalize_tool_name(tool_name)
+                tool_family = normalize_tool_family(normalized_tool_name)
+
+            extra = record.get("extra")
+            if not isinstance(extra, dict):
+                extra = {}
+            if not tool_name and not payload.get("tool_name"):
+                potential_tool = str(extra.get("tool_name", ""))
+                if potential_tool:
+                    tool_name = potential_tool
+                    normalized_tool_name = normalize_tool_name(potential_tool)
+                    tool_family = normalize_tool_family(normalized_tool_name)
 
         flags = _assistant_signal_flags(payload) if event_type == "transcript_message_assistant" else {
             "assistant_work_done": False,
             "assistant_has_verification": False,
             "assistant_has_subagent_status": False,
         }
+        acceptance = {}
+        if isinstance(payload.get("acceptance"), dict):
+            acceptance.update({str(k): v for k, v in payload["acceptance"].items() if isinstance(k, str)})
+        if isinstance(record.get("acceptance"), dict):
+            acceptance.update({str(k): v for k, v in record["acceptance"].items() if isinstance(k, str)})
+        if isinstance(record.get("acceptance_source"), str):
+            acceptance["source"] = record["acceptance_source"]
+        for key in ("verification_status", "review_status", "subagent_status", "risk_status"):
+            if isinstance(record.get(key), str):
+                acceptance[key] = record[key]
+        for key in ("has_work_done_signal", "has_verification_signal", "has_subagent_signal"):
+            if key in record:
+                acceptance[key] = record[key]
+        if event_type.startswith("orchestrator_") and isinstance(record.get("extra"), dict):
+            acceptance.update({str(k): v for k, v in record["extra"].items() if isinstance(k, str) and k.startswith("has_")})
+
         event_ts = None
         if ts:
             event_ts = ts.isoformat().replace("+00:00", "Z")
@@ -319,11 +580,22 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
                 input_length=input_length,
                 output_length=output_length,
                 token_count=token_count,
+                reason=event_reason,
+                normalized_tool_name=normalized_tool_name,
+                tool_family=tool_family,
                 source_file=extract_source_file(codex_home, source_file),
                 source_line=source_line,
                 assistant_work_done=flags["assistant_work_done"],
                 assistant_has_verification=flags["assistant_has_verification"],
                 assistant_has_subagent_status=flags["assistant_has_subagent_status"],
+                acceptance_source=str(acceptance.get("source") or ""),
+                verification_status=str(acceptance.get("verification_status") or ""),
+                review_status=str(acceptance.get("review_status") or ""),
+                subagent_status=str(acceptance.get("subagent_status") or ""),
+                risk_status=str(acceptance.get("risk_status") or ""),
+                acceptance_has_work_done_signal=_to_bool(acceptance.get("has_work_done_signal")),
+                acceptance_has_verification_signal=_to_bool(acceptance.get("has_verification_signal")),
+                acceptance_has_subagent_signal=_to_bool(acceptance.get("has_subagent_signal")),
             )
         )
 
@@ -337,6 +609,9 @@ def fact_to_dict(fact: SessionFact) -> Dict[str, object]:
         "cwd": fact.cwd,
         "event_type": fact.event_type,
         "role": fact.role,
+        "reason": fact.reason,
+        "normalized_tool_name": fact.normalized_tool_name,
+        "tool_family": fact.tool_family,
         "tool_name": fact.tool_name,
         "status": fact.status,
         "input_length": fact.input_length,
@@ -347,4 +622,20 @@ def fact_to_dict(fact: SessionFact) -> Dict[str, object]:
         "assistant_work_done": fact.assistant_work_done,
         "assistant_has_verification": fact.assistant_has_verification,
         "assistant_has_subagent_status": fact.assistant_has_subagent_status,
+        "acceptance": {
+            "source": fact.acceptance_source,
+            "verification_status": fact.verification_status,
+            "review_status": fact.review_status,
+            "subagent_status": fact.subagent_status,
+            "risk_status": fact.risk_status,
+            "has_work_done_signal": fact.acceptance_has_work_done_signal,
+            "has_verification_signal": fact.acceptance_has_verification_signal,
+            "has_subagent_signal": fact.acceptance_has_subagent_signal,
+        },
+        "tool_surface": {
+            "normalized_tool_name": fact.normalized_tool_name,
+            "tool_family": fact.tool_family,
+            "input_length": fact.input_length,
+            "output_length": fact.output_length,
+        },
     }

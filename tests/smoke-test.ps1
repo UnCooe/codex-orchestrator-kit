@@ -138,6 +138,7 @@ if ([regex]::Matches($installedText, 'orchestrator_user_prompt\.py').Count -ne 1
 $requiredFiles = @(
     (Join-Path $AgentsHome 'skills\orchestrator\SKILL.md'),
     (Join-Path $AgentsHome 'skills\orchestrator-observability\SKILL.md'),
+    (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md'),
     (Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py'),
     (Join-Path $CodexHome 'hooks\orchestrator_observability.py'),
     (Join-Path $CodexHome 'agents\critic.toml')
@@ -172,6 +173,18 @@ Assert-JsonField -JsonText $preBlockOutput -Predicate {
     $value.decision -eq 'block'
 } -Message 'PreToolUse broad scan did not block.'
 
+$preShellCommandBlockOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"shell_command","tool_input":{"command":"Get-ChildItem -Recurse"}}'
+Assert-JsonField -JsonText $preShellCommandBlockOutput -Predicate {
+    param($value)
+    $value.decision -eq 'block'
+} -Message 'PreToolUse shell_command broad scan did not block.'
+
+$prePowerShellBlockOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"powershell","tool_input":{"command":"Select-String -Path . -Recurse -Pattern TODO"}}'
+Assert-JsonField -JsonText $prePowerShellBlockOutput -Predicate {
+    param($value)
+    $value.decision -eq 'block'
+} -Message 'PreToolUse PowerShell broad scan did not block.'
+
 $largeResponse = 'x' * 60001
 $postBlockPayload = @{ tool_name = 'bash'; tool_response = $largeResponse } | ConvertTo-Json -Compress
 $postBlockOutput = Invoke-PythonHook -Script $postTool -InputJson $postBlockPayload
@@ -179,6 +192,13 @@ Assert-JsonField -JsonText $postBlockOutput -Predicate {
     param($value)
     $value.decision -eq 'block' -and $value.continue -eq $false
 } -Message 'PostToolUse large Bash output did not block.'
+
+$postShellCommandBlockPayload = @{ tool_name = 'shell_command'; tool_response = $largeResponse } | ConvertTo-Json -Compress
+$postShellCommandBlockOutput = Invoke-PythonHook -Script $postTool -InputJson $postShellCommandBlockPayload
+Assert-JsonField -JsonText $postShellCommandBlockOutput -Predicate {
+    param($value)
+    $value.decision -eq 'block' -and $value.continue -eq $false
+} -Message 'PostToolUse large shell_command output did not block.'
 
 $postPassPayload = @{ tool_name = 'python'; tool_response = $largeResponse } | ConvertTo-Json -Compress
 $postPassOutput = Invoke-PythonHook -Script $postTool -InputJson $postPassPayload
@@ -212,6 +232,20 @@ Assert-JsonField -JsonText $stopPassOutput -Predicate {
     param($value)
     $value.continue -eq $true
 } -Message 'Stop hook did not pass with verification and lifecycle status.'
+
+$structuredAcceptanceMessage = @'
+implemented the requested change in the portable kit and updated installer behavior.
+verification_status=pass
+review_status=not_required
+subagent_status=closed
+risk_status=low
+'@
+$structuredStopPayload = @{ transcript_path = $transcript; last_assistant_message = $structuredAcceptanceMessage } | ConvertTo-Json -Compress
+$structuredStopOutput = Invoke-PythonHook -Script $stopHook -InputJson $structuredStopPayload
+Assert-JsonField -JsonText $structuredStopOutput -Predicate {
+    param($value)
+    $value.continue -eq $true
+} -Message 'Stop hook did not pass with structured acceptance footer.'
 
 $sessionsRoot = Join-Path $CodexHome 'sessions'
 New-Item -ItemType Directory -Path $sessionsRoot -Force | Out-Null
@@ -247,11 +281,28 @@ if ($preNoCaptureEvent.PSObject.Properties.Name -contains 'captured_text') {
 if ($preNoCaptureEvent.event_name -ne 'pre_tool_use') {
     throw 'Expected pre_tool_use observability event.'
 }
+if ($preNoCaptureEvent.normalized_tool_name -ne 'bash' -or $preNoCaptureEvent.tool_family -ne 'shell_like' -or $preNoCaptureEvent.input_length -lt 1) {
+    throw 'PreToolUse observability event missing normalized tool-surface metadata.'
+}
 if (Test-Path $transcriptForObservability) {
     throw 'Observability logging should not append to Codex transcript files.'
 }
 if ((Get-Content -Raw $eventLog.FullName) -match "`r`n`r`n") {
     throw 'Observability event should be compact JSONL (single-line entries).'
+}
+
+$postNonShellMetadataPayload = @{
+    tool_name = 'python'
+    tool_response = $largeResponse
+    transcript_path = $transcriptForObservability
+} | ConvertTo-Json -Compress
+$postNonShellMetadataOutput = Invoke-PythonHook -Script $postTool -InputJson $postNonShellMetadataPayload
+if (-not [string]::IsNullOrWhiteSpace(($postNonShellMetadataOutput -join ''))) {
+    throw 'PostToolUse non-shell metadata case should not block.'
+}
+$postNonShellEvent = Read-JsonlLast -Path $eventLog.FullName
+if ($postNonShellEvent.event_name -ne 'post_tool_use' -or $postNonShellEvent.normalized_tool_name -ne 'python' -or $postNonShellEvent.tool_family -ne 'generic' -or $postNonShellEvent.output_length -lt 60001) {
+    throw 'PostToolUse non-shell event missing normalized tool-surface metadata.'
 }
 
 $env:ORCHESTRATOR_OBSERVABILITY_CAPTURE_TEXT = '1'
@@ -305,10 +356,36 @@ $nestedSessionContent = @(
 ) -join "`n"
 [System.IO.File]::WriteAllText($nestedSession, $nestedSessionContent, [System.Text.UTF8Encoding]::new($false))
 
+$contextProject = Join-Path $env:TEMP ('project-context-smoke-' + [Guid]::NewGuid().ToString('N'))
+$contextProjectName = Split-Path -Leaf $contextProject
+New-Item -ItemType Directory -Path (Join-Path $contextProject '.codex') -Force | Out-Null
+@'
+项目目标: Smoke validation project
+当前阶段: test fixture
+核心模块: observability
+常用命令: smoke-test
+验收标准: reports include redacted context
+已知风险: api_key=supersecret
+裸 token: sk-1234567890abcdefghijklmnopqrstuvwxyz
+'@ | Set-Content -Path (Join-Path $contextProject '.codex\project-context.md') -Encoding utf8
+$contextSession = Join-Path $nestedSessionDir 'rollout-project-context-session.jsonl'
+$contextSessionContent = @(
+    (@{ type = 'session_meta'; payload = @{ id = 'project-context-session'; cwd = $contextProject }; timestamp = '2026-05-02T00:00:13Z' } | ConvertTo-Json -Compress -Depth 10),
+    (@{ payload = @{ type = 'message'; role = 'assistant'; content = 'implemented context fixture. Verification: smoke test.' }; timestamp = '2026-05-02T00:00:14Z' } | ConvertTo-Json -Compress -Depth 10)
+) -join "`n"
+[System.IO.File]::WriteAllText($contextSession, $contextSessionContent, [System.Text.UTF8Encoding]::new($false))
+
 $analyzer = Join-Path $AgentsHome 'skills\orchestrator-observability\scripts\analyze.py'
 $triage = Join-Path $AgentsHome 'skills\orchestrator-observability\scripts\triage.py'
+$subagentWorkflow = Join-Path $AgentsHome 'skills\orchestrator-observability\scripts\subagent_workflow.py'
+$turnstateReport = Join-Path $AgentsHome 'skills\turnstate-observability\scripts\turnstate_report.py'
 $reportId = ('smoke-' + [Guid]::NewGuid().ToString('N'))
 $python = Get-PythonCommand
+$unitArgs = @()
+if ($python.Length -gt 1) {
+    $unitArgs += $python[1..($python.Length - 1)]
+}
+& $python[0] @($unitArgs + (Join-Path $root 'tests\test_session_facts_since_days.py'))
 $analyzerOutput = & $python[0] @($python[1..($python.Length - 1)] + $analyzer + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $reportId))
 $analyzerOutputObj = $analyzerOutput | ConvertFrom-Json
 if ($analyzerOutputObj.totals.orchestrator_events -lt 3) {
@@ -355,8 +432,25 @@ if ($reportObj.projects.'acme-tooling' -lt 1 -or $reportObj.projects.'acme-web' 
 if ($reportObj.projects.'meta-project' -lt 1) {
     throw 'Analyzer did not inherit project CWD from nested session_meta.'
 }
+$contextProjectProp = $reportObj.projects.PSObject.Properties | Where-Object { $_.Name -eq $contextProjectName } | Select-Object -First 1
+$contextProjectCount = if ($contextProjectProp) { $contextProjectProp.Value } else { 0 }
+if (-not $contextProjectCount -or $contextProjectCount -lt 1) {
+    throw 'Analyzer did not aggregate project context fixture project.'
+}
 if ($reportObj.sessions_seen -lt 3) {
     throw "Analyzer sessions_seen should count real session ids; got $($reportObj.sessions_seen)."
+}
+if (-not $reportObj.tool_surface.families.shell_like -or $reportObj.tool_surface.families.shell_like -lt 1) {
+    throw 'Analyzer report missing tool_surface shell_like family summary.'
+}
+$contextKey = "project:$contextProjectName"
+$contextEntryProp = $reportObj.project_context.PSObject.Properties | Where-Object { $_.Name -eq $contextKey } | Select-Object -First 1
+$contextEntry = if ($contextEntryProp) { $contextEntryProp.Value } else { $null }
+if (-not $contextEntry -or -not $contextEntry.available) {
+    throw 'Analyzer report did not include available project context.'
+}
+if ($contextEntry.summary -match 'supersecret' -or $contextEntry.summary -match 'sk-1234567890abcdefghijklmnopqrstuvwxyz' -or $contextEntry.summary -notmatch '\[redacted\]') {
+    throw 'Analyzer project context summary was not redacted.'
 }
 if (-not ($reportObj.facts | Where-Object { $_.session_id -eq 'nested-meta-session' -and $_.cwd -match 'meta-project' })) {
     throw 'Analyzer facts did not inherit session id and cwd from nested session_meta.'
@@ -374,17 +468,95 @@ $rawJsonReportText = Get-Content -Raw $jsonReport
 if ($rawJsonReportText -match 'please implement') {
     throw 'Analyzer report leaked assistant message content.'
 }
-if ($rawJsonReportText -match 'C:/repo' -or $rawJsonReportText -match 'D:/repo' -or $rawJsonReportText -match 'E:\\repo' -or $rawJsonReportText -match [regex]::Escape($CodexHome)) {
+if ($rawJsonReportText -match 'C:/repo' -or $rawJsonReportText -match 'D:/repo' -or $rawJsonReportText -match 'E:\\repo' -or $rawJsonReportText -match [regex]::Escape($CodexHome) -or $rawJsonReportText -match [regex]::Escape($contextProject)) {
     throw 'Analyzer report leaked full local paths while --include-paths was not set.'
 }
 if ($reportObj.facts.Count -lt 1) {
     throw 'Analyzer report did not include structured facts.'
 }
-$requiredFactFields = @('timestamp','session_id','cwd','event_type','role','tool_name','status','input_length','output_length','token_count','source_file','source_line')
+$requiredFactFields = @('timestamp','session_id','cwd','event_type','role','reason','tool_name','normalized_tool_name','tool_family','status','input_length','output_length','token_count','source_file','source_line','acceptance','tool_surface')
 foreach ($field in $requiredFactFields) {
     if (-not ($reportObj.facts[0].PSObject.Properties.Name -contains $field)) {
         throw "Missing required fact field: $field"
     }
+}
+
+$structuredStopFact = $reportObj.facts | Where-Object { $_.event_type -eq 'orchestrator_stop' -and $_.acceptance.source -eq 'structured' } | Select-Object -First 1
+if (-not $structuredStopFact -or $structuredStopFact.acceptance.verification_status -ne 'pass') {
+    throw 'Analyzer facts did not preserve structured acceptance fields.'
+}
+if (-not ($reportObj.facts | Where-Object { $_.event_type -eq 'orchestrator_pre_tool_use' -and $_.tool_name -eq 'bash' -and $_.normalized_tool_name -eq 'bash' })) {
+    throw 'Analyzer facts did not preserve orchestrator event tool_name and normalized alias.'
+}
+$structuredVerifiedProp = $reportObj.structured_acceptance.PSObject.Properties | Where-Object { $_.Name -eq 'structured_acceptance_verified' } | Select-Object -First 1
+$structuredVerified = if ($structuredVerifiedProp) { $structuredVerifiedProp.Value } else { 0 }
+if (-not $structuredVerified -or $structuredVerified -lt 1) {
+    throw 'Analyzer structured acceptance counters did not count verified structured footer.'
+}
+
+$subagentWorkflowReportId = ('smoke-subagent-' + [Guid]::NewGuid().ToString('N'))
+$subagentWorkflowOutput = & $python[0] @($python[1..($python.Length - 1)] + $subagentWorkflow + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $subagentWorkflowReportId))
+$subagentWorkflowOutputObj = $subagentWorkflowOutput | ConvertFrom-Json
+if ($subagentWorkflowOutputObj.subagents.spawn -lt 1 -or $subagentWorkflowOutputObj.subagents.close -lt 1) {
+    throw 'Subagent workflow report did not count spawn/close activity.'
+}
+$subagentWorkflowJsonReport = Join-Path (Join-Path $CodexHome 'orchestrator-observability\reports') "subagent-workflow-$subagentWorkflowReportId.json"
+$subagentWorkflowMdReport = Join-Path (Join-Path $CodexHome 'orchestrator-observability\reports') "subagent-workflow-$subagentWorkflowReportId.md"
+if (-not (Test-Path $subagentWorkflowJsonReport) -or -not (Test-Path $subagentWorkflowMdReport)) {
+    throw 'Subagent workflow report files were not written.'
+}
+$subagentWorkflowObj = Get-Content -Raw -Encoding UTF8 $subagentWorkflowJsonReport | ConvertFrom-Json
+if ($subagentWorkflowObj.report_type -ne 'subagent_workflow' -or $subagentWorkflowObj.workflow_signals.broad_scan_blocks -lt 1) {
+    throw 'Subagent workflow report missing expected workflow signals.'
+}
+$rawSubagentWorkflowText = Get-Content -Raw -Encoding UTF8 $subagentWorkflowJsonReport
+if ($rawSubagentWorkflowText -match [regex]::Escape($contextProject) -or $rawSubagentWorkflowText -match 'supersecret' -or $rawSubagentWorkflowText -match 'sk-1234567890abcdefghijklmnopqrstuvwxyz') {
+    throw 'Subagent workflow report leaked project context path or secret.'
+}
+
+$turnstateReportId = ('smoke-turnstate-' + [Guid]::NewGuid().ToString('N'))
+$turnstateOutput = & $python[0] @($python[1..($python.Length - 1)] + $turnstateReport + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $turnstateReportId))
+$turnstateOutputObj = $turnstateOutput | ConvertFrom-Json
+if ($turnstateOutputObj.sessions_seen -lt 1) {
+    throw 'Turnstate report did not see fixture sessions.'
+}
+
+$turnstateJsonReport = Join-Path (Join-Path $CodexHome 'turnstate-observability\reports') "turnstate-compliance-$turnstateReportId.json"
+$turnstateMdReport = Join-Path (Join-Path $CodexHome 'turnstate-observability\reports') "turnstate-compliance-$turnstateReportId.md"
+if (-not (Test-Path $turnstateJsonReport)) {
+    throw "Missing Turnstate JSON report: $turnstateJsonReport"
+}
+if (-not (Test-Path $turnstateMdReport)) {
+    throw "Missing Turnstate markdown report: $turnstateMdReport"
+}
+
+$turnstateReportObj = Get-Content -Raw -Encoding UTF8 $turnstateJsonReport | ConvertFrom-Json
+if ($turnstateReportObj.rule_profile -ne 'turnstate-default-v1') {
+    throw 'Turnstate report used an unexpected rule profile.'
+}
+if (-not ($turnstateReportObj.PSObject.Properties.Name -contains 'score')) {
+    throw 'Turnstate report missing score.'
+}
+if (-not ($turnstateReportObj.rule_failures.PSObject.Properties.Name -contains 'final_acceptance_present')) {
+    throw 'Turnstate report did not classify missing final acceptance verification.'
+}
+if (-not $turnstateReportObj.suggestions -or $turnstateReportObj.suggestions.Count -lt 1) {
+    throw 'Turnstate report did not include suggestions.'
+}
+$turnstateContextEntryProp = $turnstateReportObj.project_context.PSObject.Properties | Where-Object { $_.Name -eq $contextKey } | Select-Object -First 1
+$turnstateContextEntry = if ($turnstateContextEntryProp) { $turnstateContextEntryProp.Value } else { $null }
+if (-not $turnstateContextEntry -or -not $turnstateContextEntry.available) {
+    throw 'Turnstate report did not include available project context.'
+}
+if ($turnstateContextEntry.summary -match 'supersecret' -or $turnstateContextEntry.summary -match 'sk-1234567890abcdefghijklmnopqrstuvwxyz' -or $turnstateContextEntry.summary -notmatch '\[redacted\]') {
+    throw 'Turnstate project context summary was not redacted.'
+}
+$rawTurnstateReportText = Get-Content -Raw -Encoding UTF8 $turnstateJsonReport
+if ($rawTurnstateReportText -match 'please implement') {
+    throw 'Turnstate report leaked assistant message content.'
+}
+if ($rawTurnstateReportText -match 'C:/repo' -or $rawTurnstateReportText -match 'D:/repo' -or $rawTurnstateReportText -match 'E:\\repo' -or $rawTurnstateReportText -match [regex]::Escape($CodexHome) -or $rawTurnstateReportText -match [regex]::Escape($contextProject) -or $rawTurnstateReportText -match 'sk-1234567890abcdefghijklmnopqrstuvwxyz') {
+    throw 'Turnstate report leaked full local paths while --include-paths was not set.'
 }
 
 $triageReportDir = Join-Path $CodexHome 'orchestrator-observability\reports'
@@ -594,6 +766,9 @@ if (Test-Path (Join-Path $AgentsHome 'skills\orchestrator\SKILL.md')) {
 }
 if (Test-Path (Join-Path $AgentsHome 'skills\orchestrator-observability\SKILL.md')) {
     throw 'Uninstall did not remove orchestrator observability skill.'
+}
+if (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md')) {
+    throw 'Uninstall did not remove turnstate observability skill.'
 }
 if (Test-Path (Join-Path $CodexHome 'hooks\orchestrator_user_prompt.py')) {
     throw 'Uninstall did not remove orchestrator hook script.'

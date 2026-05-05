@@ -20,6 +20,9 @@ This repository contains a portable, open-source friendly drop-in bundle for the
   - `scripts/triage.py`
   - `scripts/session_facts.py`
   - `agents/openai.yaml`
+- `skills/turnstate-observability/`
+  - `SKILL.md`
+  - `scripts/turnstate_report.py`
 - `agents/` Toml role definitions copied from local config
   - `critic.toml`
   - `implementer.toml`
@@ -130,8 +133,21 @@ Reports are written to:
 - `$env:CODEX_HOME\orchestrator-observability\reports\orchestrator-observability-<timestamp>.json`
 - `$env:CODEX_HOME\orchestrator-observability\reports\orchestrator-observability-<timestamp>.md`
 
-The analyzer reads both Codex session JSONL and the separate observability event logs, then reports delegation, subagent lifecycle, hook blocks, token/reasoning counts, large-output signals, and acceptance gaps.
+The analyzer reads both Codex session JSONL and the separate observability event logs, then reports delegation signals, hook blocks, token/reasoning counts, large-output signals, project context summaries, and acceptance gaps.
 It emits project aggregation, redacted CWD labels, a privacy-preserving facts list (with timestamp/session/event metadata), and a suggestions section for follow-up actions.
+
+Run the subagent workflow report:
+
+```powershell
+python $env:AGENTS_HOME\skills\orchestrator-observability\scripts\subagent_workflow.py `
+  --codex-home $env:CODEX_HOME `
+  --since-days 14
+```
+
+Subagent workflow reports are written to:
+
+- `$env:CODEX_HOME\orchestrator-observability\reports\subagent-workflow-<timestamp>.json`
+- `$env:CODEX_HOME\orchestrator-observability\reports\subagent-workflow-<timestamp>.md`
 
 Run triage after a report:
 
@@ -151,3 +167,27 @@ The `UserPromptSubmit` hook checks only the pending high-risk alert and reminds 
 Low-risk proposals are not pushed into the next prompt; they are surfaced only when a concrete safe patch exists.
 
 Hooks merge during install is deduplicated by event and orchestrator script name, so legacy `python .../orchestrator_*.py` entries are removed when newer `py -3` style entries are installed.
+
+## Turnstate observability
+
+Turnstate reports reuse the same privacy-preserving session fact layer. They are a separate consumer, not a second hook pipeline.
+
+Run the Turnstate compliance report:
+
+```powershell
+python $env:AGENTS_HOME\skills\turnstate-observability\scripts\turnstate_report.py `
+  --codex-home $env:CODEX_HOME `
+  --since-days 3
+```
+
+Reports are written to:
+
+- `$env:CODEX_HOME\turnstate-observability\reports\turnstate-compliance-<timestamp>.json`
+- `$env:CODEX_HOME\turnstate-observability\reports\turnstate-compliance-<timestamp>.md`
+
+The default rule profile checks observable runtime facts: reasoning-summary presence, tool call/output balance, token-count events, verification signals, and large-output noise. Reports still redact full paths and do not include full prompts, full tool output, or full assistant messages.
+
+Turnstate and subagent checks are intentionally separated:
+
+- Turnstate focuses on main-flow compliance.
+- `subagent_workflow.py` focuses on delegation and subagent lifecycle signals.

@@ -7,6 +7,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 CODEX_HOME="$TMP_ROOT/.codex"
 AGENTS_HOME="$TMP_ROOT/.agents"
+export CODEX_HOME AGENTS_HOME
 mkdir -p "$CODEX_HOME" "$AGENTS_HOME"
 cp "$ROOT/tests/fixtures/hooks.before.json" "$CODEX_HOME/hooks.json"
 if command -v python3 >/dev/null 2>&1; then
@@ -22,6 +23,7 @@ PYTHON_REAL=$(command -v "$PYTHON_BIN")
 "$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" >/dev/null
 
 test -f "$AGENTS_HOME/skills/orchestrator/SKILL.md"
+test -f "$AGENTS_HOME/skills/turnstate-observability/SKILL.md"
 test -f "$CODEX_HOME/hooks/orchestrator_user_prompt.py"
 test -f "$CODEX_HOME/agents/critic.toml"
 
@@ -53,6 +55,62 @@ if [[ -e "$DRY_CODEX" || -e "$DRY_AGENTS" ]]; then
   exit 1
 fi
 
+PRE_TOOL="$CODEX_HOME/hooks/orchestrator_pre_tool_use.py"
+POST_TOOL="$CODEX_HOME/hooks/orchestrator_post_tool_use.py"
+STOP_HOOK="$CODEX_HOME/hooks/orchestrator_stop.py"
+SESSIONS_ROOT="$CODEX_HOME/sessions"
+mkdir -p "$SESSIONS_ROOT"
+
+TRANSCRIPT_FOR_HOOKS="$SESSIONS_ROOT/hook-events.jsonl"
+SHELL_COMMAND_BLOCK=$(printf '%s' "{\"tool_name\":\"shell_command\",\"tool_input\":{\"command\":\"find .\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
+"$PYTHON_BIN" - "$SHELL_COMMAND_BLOCK" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+if obj.get("decision") != "block":
+    raise SystemExit("shell_command broad scan was not blocked")
+PY
+
+POWERSHELL_BLOCK=$(printf '%s' "{\"tool_name\":\"powershell\",\"tool_input\":{\"command\":\"Get-ChildItem -Recurse\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
+"$PYTHON_BIN" - "$POWERSHELL_BLOCK" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+if obj.get("decision") != "block":
+    raise SystemExit("PowerShell broad scan was not blocked")
+PY
+
+POST_SHELL_BLOCK=$("$PYTHON_BIN" -c "import json; print(json.dumps({'tool_name':'shell_command','tool_response':'x'*60001,'transcript_path':'$TRANSCRIPT_FOR_HOOKS'}))" | "$PYTHON_BIN" "$POST_TOOL")
+"$PYTHON_BIN" - "$POST_SHELL_BLOCK" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+if obj.get("decision") != "block" or obj.get("continue") is not False:
+    raise SystemExit("Large shell_command output was not blocked")
+PY
+
+POST_NON_SHELL=$("$PYTHON_BIN" -c "import json; print(json.dumps({'tool_name':'python','tool_response':'x'*60001,'transcript_path':'$TRANSCRIPT_FOR_HOOKS'}))" | "$PYTHON_BIN" "$POST_TOOL")
+if [[ -n "$POST_NON_SHELL" ]]; then
+  echo "Large non-shell output should not block" >&2
+  exit 1
+fi
+
+STRUCTURED_STOP=$(cat <<JSON | "$PYTHON_BIN" "$STOP_HOOK"
+{"transcript_path":"$TRANSCRIPT_FOR_HOOKS","last_assistant_message":"implemented hook behavior.\nverification_status=pass\nreview_status=not_required\nsubagent_status=closed\nrisk_status=low"}
+JSON
+)
+"$PYTHON_BIN" - "$STRUCTURED_STOP" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+if obj.get("continue") is not True:
+    raise SystemExit("Structured acceptance stop payload did not pass")
+PY
+
 SPACE_PY_DIR="$TMP_ROOT/python with space"
 mkdir -p "$SPACE_PY_DIR"
 SPACE_PY="$SPACE_PY_DIR/python3"
@@ -76,7 +134,6 @@ if not command.startswith(expected):
     raise SystemExit(f"Python override with spaces was not quoted: {command}")
 PY
 
-SESSIONS_ROOT="$CODEX_HOME/sessions"
 mkdir -p "$SESSIONS_ROOT"
 cp "$ROOT/tests/fixtures/session-observability.jsonl" "$SESSIONS_ROOT/session-smoke.jsonl"
 mkdir -p "$SESSIONS_ROOT/2026/05/03"
@@ -84,6 +141,24 @@ cat > "$SESSIONS_ROOT/2026/05/03/rollout-nested-meta-session.jsonl" <<'JSONL'
 {"type":"session_meta","payload":{"id":"nested-meta-session","cwd":"/tmp/repo/meta-project"},"timestamp":"2026-05-02T00:00:11Z"}
 {"payload":{"type":"message","role":"assistant","content":"implemented nested metadata change. Done."},"timestamp":"2026-05-02T00:00:12Z"}
 JSONL
+PROJECT_CONTEXT_DIR="$TMP_ROOT/project-context-smoke"
+PROJECT_CONTEXT_NAME=$(basename "$PROJECT_CONTEXT_DIR")
+mkdir -p "$PROJECT_CONTEXT_DIR/.codex"
+cat > "$PROJECT_CONTEXT_DIR/.codex/project-context.md" <<'EOF'
+项目目标: Smoke validation project
+当前阶段: test fixture
+核心模块: observability
+常用命令: smoke-test
+验收标准: reports include redacted context
+已知风险: api_key=supersecret
+裸 token: sk-1234567890abcdefghijklmnopqrstuvwxyz
+EOF
+cat > "$SESSIONS_ROOT/2026/05/03/rollout-project-context-session.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"project-context-session","cwd":"$PROJECT_CONTEXT_DIR"},"timestamp":"2026-05-02T00:00:13Z"}
+{"payload":{"type":"message","role":"assistant","content":"implemented context fixture. Verification: smoke test."},"timestamp":"2026-05-02T00:00:14Z"}
+JSONL
+
+"$PYTHON_BIN" "$ROOT/tests/test_session_facts_since_days.py"
 
 "$PYTHON_BIN" "$AGENTS_HOME/skills/orchestrator-observability/scripts/analyze.py" \
   --codex-home "$CODEX_HOME" \
@@ -93,7 +168,7 @@ JSONL
 REPORT_DIR="$CODEX_HOME/orchestrator-observability/reports"
 JSON_REPORT="$REPORT_DIR/orchestrator-observability-smoke.json"
 test -f "$JSON_REPORT"
-"$PYTHON_BIN" - "$JSON_REPORT" <<'PY'
+"$PYTHON_BIN" - "$JSON_REPORT" "$PROJECT_CONTEXT_DIR" "$PROJECT_CONTEXT_NAME" <<'PY'
 import json
 import sys
 
@@ -107,8 +182,24 @@ if "acme-tooling" not in obj["projects"]:
     raise SystemExit("Analyzer missing cwd project aggregation")
 if "meta-project" not in obj["projects"]:
     raise SystemExit("Analyzer did not inherit cwd from nested session_meta")
+if sys.argv[3] not in obj["projects"]:
+    raise SystemExit("Analyzer did not aggregate project context fixture project")
+context_key = f"project:{sys.argv[3]}"
+context = obj.get("project_context", {}).get(context_key)
+if not context or not context.get("available"):
+    raise SystemExit("Analyzer did not include available project context")
+if "supersecret" in context.get("summary", "") or "sk-1234567890abcdefghijklmnopqrstuvwxyz" in context.get("summary", "") or "[redacted]" not in context.get("summary", ""):
+    raise SystemExit("Analyzer project context summary was not redacted")
+if obj.get("tool_surface", {}).get("families", {}).get("shell_like", 0) < 1:
+    raise SystemExit("Analyzer missing tool_surface shell_like family")
 if not any(f["session_id"] == "nested-meta-session" and f["cwd"].endswith("meta-project") for f in obj["facts"]):
     raise SystemExit("Analyzer did not inherit nested session id/cwd facts")
+if not any(f.get("event_type") == "orchestrator_stop" and f.get("acceptance", {}).get("source") == "structured" for f in obj["facts"]):
+    raise SystemExit("Analyzer did not preserve structured acceptance fields")
+if not any(f.get("event_type") == "orchestrator_pre_tool_use" and f.get("tool_name") == "shell_command" and f.get("normalized_tool_name") == "shell_command" for f in obj["facts"]):
+    raise SystemExit("Analyzer did not preserve orchestrator event tool_name")
+if obj.get("structured_acceptance", {}).get("structured_acceptance_verified", 0) < 1:
+    raise SystemExit("Analyzer structured acceptance counters did not count verified footer")
 if not obj.get("suggestions"):
     raise SystemExit("Analyzer suggestions missing")
 if not any("verification" in item.lower() for item in obj["suggestions"]):
@@ -118,8 +209,68 @@ if any("no sessions were detected" in item.lower() for item in obj["suggestions"
 if any("please implement" in json.dumps(v) for v in obj["facts"]):
     raise SystemExit("Analyzer leaked assistant content in facts")
 report_text = json.dumps(obj)
-if any(path in report_text for path in ("C:/repo", "D:/repo", "/tmp/repo")):
+if any(path in report_text for path in ("C:/repo", "D:/repo", "/tmp/repo", sys.argv[2])):
     raise SystemExit("Analyzer leaked full local paths without --include-paths")
+PY
+
+"$PYTHON_BIN" "$AGENTS_HOME/skills/orchestrator-observability/scripts/subagent_workflow.py" \
+  --codex-home "$CODEX_HOME" \
+  --since-days 30 \
+  --report-id smoke > /tmp/subagent-workflow-smoke-report.json
+
+SUBAGENT_WORKFLOW_REPORT="$REPORT_DIR/subagent-workflow-smoke.json"
+test -f "$SUBAGENT_WORKFLOW_REPORT"
+"$PYTHON_BIN" - "$SUBAGENT_WORKFLOW_REPORT" "$PROJECT_CONTEXT_DIR" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    obj = json.load(stream)
+if obj.get("report_type") != "subagent_workflow":
+    raise SystemExit("Subagent workflow report type missing")
+if obj.get("subagents", {}).get("spawn", 0) < 1:
+    raise SystemExit("Subagent workflow report did not count spawn activity")
+if obj.get("workflow_signals", {}).get("broad_scan_blocks", 0) < 1:
+    raise SystemExit("Subagent workflow report did not count broad scan blocks")
+report_text = json.dumps(obj, ensure_ascii=False)
+if sys.argv[2] in report_text or "supersecret" in report_text or "sk-1234567890abcdefghijklmnopqrstuvwxyz" in report_text:
+    raise SystemExit("Subagent workflow report leaked project context path or secret")
+PY
+
+"$PYTHON_BIN" "$AGENTS_HOME/skills/turnstate-observability/scripts/turnstate_report.py" \
+  --codex-home "$CODEX_HOME" \
+  --since-days 30 \
+  --report-id smoke > /tmp/turnstate-observability-smoke-report.json
+
+TURNSTATE_REPORT="$CODEX_HOME/turnstate-observability/reports/turnstate-compliance-smoke.json"
+test -f "$TURNSTATE_REPORT"
+"$PYTHON_BIN" - "$TURNSTATE_REPORT" "$PROJECT_CONTEXT_DIR" "$PROJECT_CONTEXT_NAME" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    obj = json.load(stream)
+if obj["rule_profile"] != "turnstate-default-v1":
+    raise SystemExit("Turnstate report used an unexpected rule profile")
+if obj["sessions_seen"] < 1:
+    raise SystemExit("Turnstate report did not see fixture sessions")
+if "score" not in obj:
+    raise SystemExit("Turnstate report missing score")
+if "final_acceptance_present" not in obj.get("rule_failures", {}):
+    raise SystemExit("Turnstate report did not classify missing final acceptance verification")
+if not obj.get("suggestions"):
+    raise SystemExit("Turnstate report suggestions missing")
+context_key = f"project:{sys.argv[3]}"
+context = obj.get("project_context", {}).get(context_key)
+if not context or not context.get("available"):
+    raise SystemExit("Turnstate report did not include available project context")
+if "supersecret" in context.get("summary", "") or "sk-1234567890abcdefghijklmnopqrstuvwxyz" in context.get("summary", "") or "[redacted]" not in context.get("summary", ""):
+    raise SystemExit("Turnstate project context summary was not redacted")
+report_text = json.dumps(obj, ensure_ascii=False)
+if "please implement" in report_text:
+    raise SystemExit("Turnstate report leaked assistant content")
+if any(path in report_text for path in ("C:/repo", "D:/repo", "/tmp/repo", sys.argv[1].split("/turnstate-observability/")[0], sys.argv[2], "sk-1234567890abcdefghijklmnopqrstuvwxyz")):
+    raise SystemExit("Turnstate report leaked full local paths without --include-paths")
 PY
 
 TRIAGE="$AGENTS_HOME/skills/orchestrator-observability/scripts/triage.py"

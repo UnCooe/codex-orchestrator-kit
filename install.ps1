@@ -291,6 +291,7 @@ Write-Host "input: source=$scriptRoot, codex_home=$CodexHome, agents_home=$Agent
 $targets = @(
     @{ Source = Join-Path $scriptRoot 'skills\orchestrator'; Destination = Join-Path $AgentsHome 'skills\orchestrator' },
     @{ Source = Join-Path $scriptRoot 'skills\orchestrator-observability'; Destination = Join-Path $AgentsHome 'skills\orchestrator-observability' },
+    @{ Source = Join-Path $scriptRoot 'skills\turnstate-observability'; Destination = Join-Path $AgentsHome 'skills\turnstate-observability' },
     @{ Source = Join-Path $scriptRoot 'hooks'; Destination = Join-Path $CodexHome 'hooks' },
     @{ Source = Join-Path $scriptRoot 'agents'; Destination = Join-Path $CodexHome 'agents' }
 )

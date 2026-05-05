@@ -39,6 +39,18 @@ _REDACTION_PATTERNS = [
     ),
 ]
 
+_NORMALIZED_TOOL_NAMES = {
+    "bash": "bash",
+    "sh": "bash",
+    "zsh": "bash",
+    "shell": "bash",
+    "shell_command": "shell_command",
+    "powershell": "powershell",
+    "pwsh": "powershell",
+    "command": "powershell",
+    "cmd": "powershell",
+}
+
 
 def _flatten_text(value: Any) -> str:
     if isinstance(value, str):
@@ -55,6 +67,24 @@ def _redact_text(text: str) -> str:
     for pattern, replacement in _REDACTION_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
     return redacted
+
+
+def normalize_tool_name(tool_name: Any) -> str:
+    raw = str(tool_name).strip().lower() if tool_name is not None else ""
+    if not raw:
+        return ""
+    return _NORMALIZED_TOOL_NAMES.get(raw, raw)
+
+
+def normalize_tool_family(tool_name: str) -> str:
+    normalized = normalize_tool_name(tool_name)
+    if normalized in {"bash", "shell_command", "powershell"}:
+        return "shell_like"
+    return "generic"
+
+
+def text_length(value: Any) -> int:
+    return len(_flatten_text(value))
 
 
 def _capture_text(value: Any) -> Optional[str]:
