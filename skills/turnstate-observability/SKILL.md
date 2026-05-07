@@ -7,13 +7,15 @@ description: Generate privacy-preserving Turnstate compliance reports from local
 
 Use this skill when reviewing whether Codex runs followed the expected Turnstate control logic.
 It consumes the shared session fact layer from `orchestrator-observability` and does not read full prompt text, full tool output, or full assistant messages.
+Use `docs/reviewers/turnstate-rubric.md` as the default standard before deciding whether a signal is good, watch-level, bad, or an allowed exception.
 
 ## Workflow
 
 1. Generate a Turnstate compliance report for a concrete time window.
-2. Read the Markdown summary first.
-3. Use the JSON report only for exact counts, rule failures, and automation output.
-4. Recommend rule or workflow changes as a short patch list; do not edit live configuration unless the user asks.
+2. Read the Turnstate rubric.
+3. Read the Markdown summary first.
+4. Use the JSON report only for exact counts, rule failures, and automation output.
+5. Recommend rule or workflow changes as a short patch list; do not edit live configuration unless the user asks.
 
 PowerShell:
 
@@ -43,6 +45,12 @@ It checks observable runtime facts only:
 Note: subagent delegation/lifecycle signals are now tracked by the separate
 `orchestrator-observability` subagent workflow report and are not part of the Turnstate rule profile.
 
+Apply the rubric before escalating:
+
+- `observe` one-off, old, explained, or purely exploratory signals.
+- `triage` repeated or newly worse verification and output-noise issues.
+- `proposal` only safe workflow changes such as prompts, rubrics, templates, or report wording.
+
 ## User-Facing Output
 
 Keep summaries short:
@@ -53,4 +61,5 @@ Keep summaries short:
 - why it matters for Turnstate
 - recommended next action
 
+Missing project context should lower confidence but should not be treated as a high-risk finding by itself.
 Never paste full reports, prompt text, tool output, assistant messages, or local absolute paths into the user-facing summary.

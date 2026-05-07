@@ -1,0 +1,31 @@
+# Optional project-local review profile.
+# Place at .codex/review-profile.toml in a monitored project.
+
+project_id = "example-project"
+current_phase = "implementation"
+
+enabled_reviewers = [
+  "turnstate",
+  "subagent-workflow",
+]
+
+# How aggressively recurring automation should surface findings.
+# Valid v1 values: "quiet", "normal", "strict".
+reminder_policy = "normal"
+
+# Highest action level this project allows from automation.
+# Valid v1 values: "observe", "triage", "proposal".
+action_policy = "triage"
+
+# Signals that are known noisy for this project and should not escalate alone.
+known_noisy_signals = [
+  "missing_project_context",
+]
+
+# Scopes that reviewers may mention but should not propose changing automatically.
+protected_scopes = [
+  ".env",
+  "secrets",
+  "production-config",
+]
+

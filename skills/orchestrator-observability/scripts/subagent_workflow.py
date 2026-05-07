@@ -108,6 +108,12 @@ def _safe_divide(num: int, den: int) -> float:
     return round(num / den, 4)
 
 
+def _action_policy(unclosed_delta: int, broad_scan_bypasses: int) -> str:
+    if unclosed_delta > 0 or broad_scan_bypasses > 0:
+        return "triage"
+    return "observe"
+
+
 def build_report(
     codex_home: Path,
     since_days: int,
@@ -214,6 +220,10 @@ def build_report(
     for stats in per_session_subagents.values():
         if stats["spawn_agent"] > stats["close_agent"]:
             open_session_count += 1
+    action_policy = _action_policy(unclosed_delta, broad_scan_bypasses)
+    project_context_available = any(
+        isinstance(item, dict) and bool(item.get("available")) for item in project_context.values()
+    )
 
     facts_for_report = []
     for fact in facts:
@@ -227,6 +237,10 @@ def build_report(
         "since_days": since_days,
         "paths_included": include_paths,
         "report_type": "subagent_workflow",
+        "reviewer_id": "subagent-workflow",
+        "standard": "default-v1",
+        "action_policy": action_policy,
+        "project_context_available": project_context_available,
         "fact_count": len(facts),
         "totals": dict(totals),
         "window": {
@@ -267,6 +281,10 @@ def build_report(
     markdown_lines = [
         "# Subagent Workflow Report",
         "",
+        "- Reviewer: `subagent-workflow`",
+        "- Standard: `default-v1`",
+        f"- Action policy: `{action_policy}`",
+        f"- Project context available: {str(project_context_available).lower()}",
         f"- Scope: {codex_home if include_paths else '[redacted]'}",
         f"- Window: last {since_days} day(s)",
         f"- Report time: {data['generated_at']}",

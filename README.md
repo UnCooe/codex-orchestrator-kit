@@ -1,6 +1,20 @@
 # Codex Orchestrator Kit (portable)
 
 This repository contains a portable, open-source friendly drop-in bundle for the Codex Desktop orchestrator workflow.
+It is also the base for a cross-project Codex workflow review kit: the kit collects privacy-preserving facts, runs focused reviewers, and helps recurring automations decide what needs human attention.
+
+The kit is not the monitored project. Turnstate and subagent workflow are the first reviewer capabilities, not the final product boundary.
+
+## Workflow review model
+
+See `docs/workflow-review-kit.md` for the full boundary.
+
+- Kit layer: hooks, fact extraction, reports, rubrics, triage conventions, installer.
+- Reviewer layer: pluggable review capabilities such as `turnstate` and `subagent-workflow`.
+- Project profile layer: optional `.codex/project-context.md` and `.codex/review-profile.toml` in each monitored project.
+- Automation instance layer: scheduled runs that apply rubrics, read project context, and output visible triage.
+
+Recurring automation should treat timers as triggers only. Severity should come from reviewer rubrics plus project context, not from raw counts alone.
 
 ## What is included
 
@@ -30,7 +44,11 @@ This repository contains a portable, open-source friendly drop-in bundle for the
   - `reviewer.toml`
   - `test-designer.toml`
 - `templates/hooks.json.tpl`
+- `templates/project-context.md`
+- `templates/review-profile.toml`
 - `docs/research-notes.md`
+- `docs/workflow-review-kit.md`
+- `docs/reviewers/*-rubric.md`
 - `install.ps1` / `uninstall.ps1` (Windows-first)
 - `install.sh` (best-effort Unix-like)
 - `tests/fixtures/*` sample inputs for hook behavior validation
@@ -136,6 +154,9 @@ Reports are written to:
 The analyzer reads both Codex session JSONL and the separate observability event logs, then reports delegation signals, hook blocks, token/reasoning counts, large-output signals, project context summaries, and acceptance gaps.
 It emits project aggregation, redacted CWD labels, a privacy-preserving facts list (with timestamp/session/event metadata), and a suggestions section for follow-up actions.
 
+Project-specific context is opt-in. Copy `templates/project-context.md` into a monitored project as `.codex/project-context.md`.
+Copy `templates/review-profile.toml` as `.codex/review-profile.toml` when the project needs reviewer-specific reminder or action policy.
+
 Run the subagent workflow report:
 
 ```powershell
@@ -191,3 +212,10 @@ Turnstate and subagent checks are intentionally separated:
 
 - Turnstate focuses on main-flow compliance.
 - `subagent_workflow.py` focuses on delegation and subagent lifecycle signals.
+
+Reviewer standards:
+
+- Turnstate: `docs/reviewers/turnstate-rubric.md`
+- Subagent workflow: `docs/reviewers/subagent-workflow-rubric.md`
+
+Automations should read the relevant rubric, then project context, then the report summary. Missing context lowers confidence; it is not automatically a high-risk finding.

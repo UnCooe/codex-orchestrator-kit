@@ -169,6 +169,12 @@ def _score(rule_totals: Counter, rule_failures: Counter) -> int:
     return max(0, min(100, score))
 
 
+def _action_policy(status: str) -> str:
+    if status == "ok":
+        return "observe"
+    return "triage"
+
+
 def build_report(
     codex_home: Path,
     since_days: int,
@@ -307,6 +313,10 @@ def build_report(
         status = "watch"
     else:
         status = "ok"
+    action_policy = _action_policy(status)
+    project_context_available = any(
+        isinstance(item, dict) and bool(item.get("available")) for item in project_context.values()
+    )
 
     if not report_id:
         report_id = now.strftime("%Y%m%dT%H%M%SZ")
@@ -324,6 +334,10 @@ def build_report(
         "codex_home": str(codex_home) if include_paths else "[redacted]",
         "since_days": since_days,
         "paths_included": include_paths,
+        "reviewer_id": "turnstate",
+        "standard": "default-v1",
+        "action_policy": action_policy,
+        "project_context_available": project_context_available,
         "rule_profile": "turnstate-default-v1",
         "window": {
             "from": cutoff.isoformat().replace("+00:00", "Z"),
@@ -357,6 +371,10 @@ def build_report(
     markdown_lines = [
         "# Turnstate compliance report",
         "",
+        "- Reviewer: `turnstate`",
+        "- Standard: `default-v1`",
+        f"- Action policy: `{action_policy}`",
+        f"- Project context available: {str(project_context_available).lower()}",
         f"- Scope: {codex_home if include_paths else '[redacted]'}",
         f"- Window: last {since_days} day(s)",
         f"- Report time: {data['generated_at']}",

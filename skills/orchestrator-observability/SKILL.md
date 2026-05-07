@@ -6,15 +6,17 @@ description: Analyze Codex Orchestrator hook telemetry and local session JSONL t
 # Orchestrator Observability
 
 Use this skill to inspect compact observability events and Codex session JSONL without loading raw transcripts into the main context.
+Use `docs/workflow-review-kit.md` to keep the boundary clear: this kit provides review capability across projects, while individual monitored projects provide their own context and review profile.
 
 ## Workflow
 
 1. Run the analyzer with a concrete Codex home and time window.
 2. Run triage on the generated JSON report when deciding whether the user should be interrupted.
 3. Run the subagent workflow report when validating heavy-work delegation behavior.
-4. Read the generated Markdown summary first.
-4. Use the JSON report only for exact counts or automation outputs.
-5. Recommend changes as a patch list; do not directly change live workflow files unless the user asks.
+4. Read `docs/reviewers/subagent-workflow-rubric.md` before deciding whether a subagent signal is good, watch-level, bad, or an allowed exception.
+5. Read the generated Markdown summary first.
+6. Use the JSON report only for exact counts or automation outputs.
+7. Recommend changes as a patch list; do not directly change live workflow files unless the user asks.
 
 PowerShell:
 
@@ -68,9 +70,16 @@ High-risk findings write `triage/alerts/high-risk-current.json`, which the `User
 - Final-response acceptance gaps: missing verification or subagent lifecycle status.
 - Recurring candidates for `AGENTS.md`, skill, prompt-template, or hook-threshold updates.
 
+Apply the subagent workflow rubric before escalating. Do not treat every lifecycle delta as an error:
+
+- `observe` historical, low-volume, or explained signals.
+- `triage` growing deltas, repeated broad-scan bypasses, or recent heavy-work lifecycle gaps.
+- `proposal` only safe workflow changes such as prompt templates, hook thresholds, or reviewer wording.
+
 ## User-Facing Output
 
 - If triage returns `none`, do not interrupt the user.
 - If triage returns `low`, show only the short confirmation card from the proposal directory.
 - If triage returns `high`, create a Triage finding and let the next prompt reminder stay one sentence.
+- If automation is producing a visible summary, include normal text even when also emitting inbox directives.
 - Never paste full reports, prompt text, tool output, assistant messages, or local absolute paths into the user-facing summary.
