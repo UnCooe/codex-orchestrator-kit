@@ -4,6 +4,9 @@ Reviewer id: `turnstate`
 
 Standard: `default-v1`
 
+Pack status: optional external reviewer pack. Turnstate is not part of the
+default orchestrator kit install surface.
+
 ## Goal
 
 Judge whether a Codex run has a trustworthy main-flow closure. Turnstate focuses on observable workflow facts, not code correctness.
@@ -78,4 +81,3 @@ Use `triage` when the issue is repeated, newly worse, or likely to affect trust 
 ## Proposal
 
 Use `proposal` only for safe workflow changes such as updating prompts, rubrics, templates, or report wording. Do not propose application code changes from Turnstate alone.
-

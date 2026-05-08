@@ -138,7 +138,6 @@ if ([regex]::Matches($installedText, 'orchestrator_user_prompt\.py').Count -ne 1
 $requiredFiles = @(
     (Join-Path $AgentsHome 'skills\orchestrator\SKILL.md'),
     (Join-Path $AgentsHome 'skills\orchestrator-observability\SKILL.md'),
-    (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md'),
     (Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py'),
     (Join-Path $CodexHome 'hooks\orchestrator_observability.py'),
     (Join-Path $CodexHome 'agents\critic.toml')
@@ -148,6 +147,29 @@ foreach ($file in $requiredFiles) {
     if (-not (Test-Path $file)) {
         throw "Missing installed file: $file"
     }
+}
+
+$turnstateSkillPath = Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md'
+if (Test-Path $turnstateSkillPath) {
+    throw 'Default install should not install the optional Turnstate reviewer pack.'
+}
+
+$reviewProfileTemplate = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'templates\review-profile.toml')
+$enabledReviewersMatch = [regex]::Match($reviewProfileTemplate, '(?s)enabled_reviewers\s*=\s*\[(.*?)\]')
+if (-not $enabledReviewersMatch.Success) {
+    throw 'Default review-profile template missing enabled_reviewers.'
+}
+$enabledReviewers = @([regex]::Matches($enabledReviewersMatch.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+if ($enabledReviewers.Count -ne 1 -or $enabledReviewers[0] -ne 'subagent-workflow') {
+    throw "Default review-profile template should enable only subagent-workflow; got: $($enabledReviewers -join ', ')"
+}
+
+& (Join-Path $root 'install.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome -IncludeTurnstate | Out-Null
+if (-not (Test-Path $turnstateSkillPath)) {
+    throw 'IncludeTurnstate did not install the optional Turnstate reviewer skill.'
+}
+if (-not (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\scripts\turnstate_report.py'))) {
+    throw 'IncludeTurnstate did not install turnstate_report.py.'
 }
 
 $userPrompt = Join-Path $CodexHome 'hooks\orchestrator_user_prompt.py'
@@ -767,8 +789,8 @@ if (Test-Path (Join-Path $AgentsHome 'skills\orchestrator\SKILL.md')) {
 if (Test-Path (Join-Path $AgentsHome 'skills\orchestrator-observability\SKILL.md')) {
     throw 'Uninstall did not remove orchestrator observability skill.'
 }
-if (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md')) {
-    throw 'Uninstall did not remove turnstate observability skill.'
+if (-not (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md'))) {
+    throw 'Default uninstall should preserve optional Turnstate reviewer pack.'
 }
 if (Test-Path (Join-Path $CodexHome 'hooks\orchestrator_user_prompt.py')) {
     throw 'Uninstall did not remove orchestrator hook script.'
@@ -782,6 +804,11 @@ if ($uninstalledHooks -match 'orchestrator_(pre_tool_use|post_tool_use|stop|user
 }
 if ($uninstalledHooks -notmatch 'pre-existing-user-prompt\.py' -or $uninstalledHooks -notmatch 'pre-existing-pre-tool\.py') {
     throw 'Uninstall removed the pre-existing hook entry.'
+}
+
+& (Join-Path $root 'uninstall.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome -RemoveTurnstate | Out-Null
+if (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md')) {
+    throw 'RemoveTurnstate did not remove the optional Turnstate reviewer pack.'
 }
 
 Write-Host "smoke-test passed"

@@ -5,9 +5,12 @@ description: Generate privacy-preserving Turnstate compliance reports from local
 
 # Turnstate Observability
 
+This is an optional external reviewer pack. It is not installed by the core
+orchestrator kit unless the installer is run with the Turnstate option.
+
 Use this skill when reviewing whether Codex runs followed the expected Turnstate control logic.
 It consumes the shared session fact layer from `orchestrator-observability` and does not read full prompt text, full tool output, or full assistant messages.
-Use `docs/reviewers/turnstate-rubric.md` as the default standard before deciding whether a signal is good, watch-level, bad, or an allowed exception.
+Use `reviewer-packs/turnstate/docs/turnstate-rubric.md` from the source pack as the default standard before deciding whether a signal is good, watch-level, bad, or an allowed exception.
 
 ## Workflow
 

@@ -23,9 +23,38 @@ PYTHON_REAL=$(command -v "$PYTHON_BIN")
 "$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" >/dev/null
 
 test -f "$AGENTS_HOME/skills/orchestrator/SKILL.md"
-test -f "$AGENTS_HOME/skills/turnstate-observability/SKILL.md"
+test -f "$AGENTS_HOME/skills/orchestrator-observability/SKILL.md"
+if [[ -e "$AGENTS_HOME/skills/turnstate-observability/SKILL.md" ]]; then
+  echo "Default install should not install turnstate-observability" >&2
+  exit 1
+fi
 test -f "$CODEX_HOME/hooks/orchestrator_user_prompt.py"
 test -f "$CODEX_HOME/agents/critic.toml"
+
+if "$PYTHON_BIN" - "$ROOT/templates/review-profile.toml" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"enabled_reviewers\s*=\s*\[(.*?)\]", text, re.S)
+if not match:
+    raise SystemExit(1)
+body = match.group(1)
+reviewers = re.findall(r'"([^"]+)"', body)
+if reviewers != ["subagent-workflow"]:
+    raise SystemExit(1)
+PY
+then
+  :
+else
+  echo "Default review-profile template should enable only subagent-workflow" >&2
+  exit 1
+fi
+
+"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" --with-turnstate >/dev/null
+test -f "$AGENTS_HOME/skills/turnstate-observability/SKILL.md"
+test -f "$AGENTS_HOME/skills/turnstate-observability/scripts/turnstate_report.py"
 
 grep -q 'C:/legacy/orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json" && {
   echo "Legacy orchestrator_user_prompt entry should not be preserved" >&2

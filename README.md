@@ -1,16 +1,17 @@
 # Codex Orchestrator Kit (portable)
 
 This repository contains a portable, open-source friendly drop-in bundle for the Codex Desktop orchestrator workflow.
-It is also the base for a cross-project Codex workflow review kit: the kit collects privacy-preserving facts, runs focused reviewers, and helps recurring automations decide what needs human attention.
+Its default install surface is the built-in workflow layer: global orchestrator guidance, subagent roles, hooks, and subagent workflow self-observability.
 
-The kit is not the monitored project. Turnstate and subagent workflow are the first reviewer capabilities, not the final product boundary.
+It also includes a workflow review kit layer: privacy-preserving fact extraction, reports, triage conventions, reviewer rubrics, and optional external reviewer packs.
+The kit is not the monitored project. Project-specific context and reviewer choices belong in the monitored project's `.codex/` directory.
 
 ## Workflow review model
 
 See `docs/workflow-review-kit.md` for the full boundary.
 
-- Kit layer: hooks, fact extraction, reports, rubrics, triage conventions, installer.
-- Reviewer layer: pluggable review capabilities such as `turnstate` and `subagent-workflow`.
+- Built-in workflow layer: orchestrator skill, subagent roles, hooks, and default subagent workflow self-review.
+- Review kit layer: fact extraction, reports, rubrics, triage conventions, installer, and optional reviewer packs.
 - Project profile layer: optional `.codex/project-context.md` and `.codex/review-profile.toml` in each monitored project.
 - Automation instance layer: scheduled runs that apply rubrics, read project context, and output visible triage.
 
@@ -33,10 +34,8 @@ Recurring automation should treat timers as triggers only. Severity should come 
   - `scripts/analyze.py`
   - `scripts/triage.py`
   - `scripts/session_facts.py`
+  - `scripts/subagent_workflow.py`
   - `agents/openai.yaml`
-- `skills/turnstate-observability/`
-  - `SKILL.md`
-  - `scripts/turnstate_report.py`
 - `agents/` Toml role definitions copied from local config
   - `critic.toml`
   - `implementer.toml`
@@ -49,6 +48,7 @@ Recurring automation should treat timers as triggers only. Severity should come 
 - `docs/research-notes.md`
 - `docs/workflow-review-kit.md`
 - `docs/reviewers/*-rubric.md`
+- `reviewer-packs/turnstate/` optional external reviewer pack
 - `install.ps1` / `uninstall.ps1` (Windows-first)
 - `install.sh` (best-effort Unix-like)
 - `tests/fixtures/*` sample inputs for hook behavior validation
@@ -78,10 +78,22 @@ Dry run (no file writes):
 ./install.ps1 -DryRun
 ```
 
+Install the optional Turnstate reviewer pack:
+
+```
+./install.ps1 -IncludeTurnstate
+```
+
 Unix-like:
 
 ```
 ./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents
+```
+
+Unix-like with the optional Turnstate reviewer pack:
+
+```
+./install.sh --with-turnstate --codex-home /path/to/.codex --agents-home /path/to/.agents
 ```
 
 ## Uninstall
@@ -93,6 +105,11 @@ Windows:
 ```
 
 The uninstall removes orchestrator hook/agent/skill files and strips orchestrator hook entries from `hooks.json`.
+It does not remove optional external reviewer packs unless asked:
+
+```
+./uninstall.ps1 -RemoveTurnstate
+```
 
 ## Portability design
 
@@ -189,8 +206,10 @@ Low-risk proposals are not pushed into the next prompt; they are surfaced only w
 
 Hooks merge during install is deduplicated by event and orchestrator script name, so legacy `python .../orchestrator_*.py` entries are removed when newer `py -3` style entries are installed.
 
-## Turnstate observability
+## Optional Turnstate Reviewer Pack
 
+Turnstate is an optional external reviewer pack under `reviewer-packs/turnstate/`.
+It is not installed or enabled by default. Install it explicitly when a monitored project chooses `turnstate` in `.codex/review-profile.toml`.
 Turnstate reports reuse the same privacy-preserving session fact layer. They are a separate consumer, not a second hook pipeline.
 
 Run the Turnstate compliance report:
@@ -215,7 +234,7 @@ Turnstate and subagent checks are intentionally separated:
 
 Reviewer standards:
 
-- Turnstate: `docs/reviewers/turnstate-rubric.md`
 - Subagent workflow: `docs/reviewers/subagent-workflow-rubric.md`
+- Turnstate optional pack: `reviewer-packs/turnstate/docs/turnstate-rubric.md`
 
-Automations should read the relevant rubric, then project context, then the report summary. Missing context lowers confidence; it is not automatically a high-risk finding.
+Automations should read the relevant rubric, then project context, then the report summary. External reviewer packs are project-profile choices, not core kit defaults. Missing context lowers confidence; it is not automatically a high-risk finding.

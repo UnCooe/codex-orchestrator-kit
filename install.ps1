@@ -1,6 +1,7 @@
 param(
     [string]$CodexHome = $env:CODEX_HOME,
     [string]$AgentsHome = $env:AGENTS_HOME,
+    [switch]$IncludeTurnstate,
     [switch]$DryRun
 )
 
@@ -291,10 +292,13 @@ Write-Host "input: source=$scriptRoot, codex_home=$CodexHome, agents_home=$Agent
 $targets = @(
     @{ Source = Join-Path $scriptRoot 'skills\orchestrator'; Destination = Join-Path $AgentsHome 'skills\orchestrator' },
     @{ Source = Join-Path $scriptRoot 'skills\orchestrator-observability'; Destination = Join-Path $AgentsHome 'skills\orchestrator-observability' },
-    @{ Source = Join-Path $scriptRoot 'skills\turnstate-observability'; Destination = Join-Path $AgentsHome 'skills\turnstate-observability' },
     @{ Source = Join-Path $scriptRoot 'hooks'; Destination = Join-Path $CodexHome 'hooks' },
     @{ Source = Join-Path $scriptRoot 'agents'; Destination = Join-Path $CodexHome 'agents' }
 )
+
+if ($IncludeTurnstate) {
+    $targets += @{ Source = Join-Path $scriptRoot 'reviewer-packs\turnstate\skills\turnstate-observability'; Destination = Join-Path $AgentsHome 'skills\turnstate-observability' }
+}
 
 foreach ($target in $targets) {
     Stage-Files -Source $target.Source -Destination $target.Destination -Recurse

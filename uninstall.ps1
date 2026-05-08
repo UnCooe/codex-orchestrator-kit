@@ -1,6 +1,7 @@
 ﻿param(
     [string]$CodexHome = $env:CODEX_HOME,
-    [string]$AgentsHome = $env:AGENTS_HOME
+    [string]$AgentsHome = $env:AGENTS_HOME,
+    [switch]$RemoveTurnstate
 )
 
 Set-StrictMode -Version Latest
@@ -82,7 +83,6 @@ $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
 $removeTargets = @(
     (Join-Path $AgentsHome 'skills\orchestrator')
     (Join-Path $AgentsHome 'skills\orchestrator-observability')
-    (Join-Path $AgentsHome 'skills\turnstate-observability')
     (Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_post_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_stop.py')
@@ -94,6 +94,10 @@ $removeTargets = @(
     (Join-Path $CodexHome 'agents\reviewer.toml')
     (Join-Path $CodexHome 'agents\test-designer.toml')
 )
+
+if ($RemoveTurnstate) {
+    $removeTargets += (Join-Path $AgentsHome 'skills\turnstate-observability')
+}
 
 $hooksPath = Join-Path $CodexHome 'hooks.json'
 if (Test-Path $hooksPath) {

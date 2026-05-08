@@ -5,9 +5,11 @@ project_id = "example-project"
 current_phase = "implementation"
 
 enabled_reviewers = [
-  "turnstate",
   "subagent-workflow",
 ]
+
+# External reviewer packs, such as "turnstate", must be installed and enabled
+# explicitly by the monitored project.
 
 # How aggressively recurring automation should surface findings.
 # Valid v1 values: "quiet", "normal", "strict".
@@ -28,4 +30,3 @@ protected_scopes = [
   "secrets",
   "production-config",
 ]
-

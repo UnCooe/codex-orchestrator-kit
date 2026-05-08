@@ -13,7 +13,19 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 
-SESSION_FACTS_DIR = Path(__file__).resolve().parents[2] / "orchestrator-observability" / "scripts"
+def _find_session_facts_dir() -> Path:
+    script_path = Path(__file__).resolve()
+    for parent in script_path.parents:
+        candidate = parent / "orchestrator-observability" / "scripts"
+        if (candidate / "session_facts.py").exists():
+            return candidate
+        candidate = parent / "skills" / "orchestrator-observability" / "scripts"
+        if (candidate / "session_facts.py").exists():
+            return candidate
+    return script_path.parents[2] / "orchestrator-observability" / "scripts"
+
+
+SESSION_FACTS_DIR = _find_session_facts_dir()
 if str(SESSION_FACTS_DIR) not in sys.path:
     sys.path.insert(0, str(SESSION_FACTS_DIR))
 
