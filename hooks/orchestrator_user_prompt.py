@@ -119,7 +119,10 @@ def _heavy_context() -> str:
         "to retain it. Exceptions: tiny single-file edits, simple "
         "commands, explicit user request to work directly, or when subagent cost exceeds task value. "
         "If not delegating a non-trivial task, state why. If subagents were used, final acceptance "
-        "must include 'Subagents: closed' or 'Subagents: retained because ...'."
+        "must include 'Subagents: closed' or 'Subagents: retained because ...'. "
+        "When work was done, end with a compact acceptance footer containing "
+        "verification_status=..., review_status=..., subagent_status=..., risk_status=.... "
+        "The explicit lifecycle sentence and subagent_status must agree."
     )
 
 

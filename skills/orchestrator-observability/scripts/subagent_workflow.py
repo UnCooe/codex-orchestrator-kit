@@ -108,9 +108,182 @@ def _safe_divide(num: int, den: int) -> float:
     return round(num / den, 4)
 
 
-def _action_policy(unclosed_delta: int, broad_scan_bypasses: int) -> str:
-    if unclosed_delta > 0 or broad_scan_bypasses > 0:
+def _action_policy(
+    unclosed_delta: int,
+    broad_scan_bypasses: int,
+    work_done_missing_acceptance_footer: int,
+    work_done_missing_subagent_status: int,
+) -> str:
+    if (
+        unclosed_delta > 0
+        or broad_scan_bypasses > 0
+        or work_done_missing_acceptance_footer > 0
+        or work_done_missing_subagent_status > 0
+    ):
         return "triage"
+    return "observe"
+
+
+def _safe_get_int(source: Dict[str, object], key: str) -> int:
+    try:
+        return int(source.get(key, 0) or 0)
+    except Exception:
+        return 0
+
+
+def _safe_get_float(source: Dict[str, object], key: str) -> float:
+    try:
+        return float(source.get(key, 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _load_previous_report(reports_root: Path, report_id: Optional[str]) -> Optional[Dict[str, object]]:
+    candidates = []
+    for path in reports_root.glob("subagent-workflow-*.json"):
+        if report_id and path.name == f"subagent-workflow-{report_id}.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        generated_at = payload.get("generated_at")
+        candidates.append((str(generated_at or ""), path.stat().st_mtime, payload))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _compare_metric(current: int, previous: Optional[int], *, bigger_is_worse: bool = True) -> Dict[str, object]:
+    if previous is None:
+        return {"current": current, "previous": None, "delta": None, "status": "first_observation"}
+    delta = current - previous
+    if delta == 0:
+        status = "unchanged"
+    elif bigger_is_worse:
+        status = "worsened" if delta > 0 else "improved"
+    else:
+        status = "improved" if delta > 0 else "worsened"
+    return {"current": current, "previous": previous, "delta": delta, "status": status}
+
+
+def _classify_heavy_work_signal(signal_count: int, signal_sessions: int, delegated_sessions: int) -> str:
+    if signal_count <= 0:
+        return "no_signal"
+    if delegated_sessions <= 0:
+        return "misaligned"
+    if delegated_sessions >= signal_sessions:
+        return "aligned"
+    return "partial"
+
+
+def _heavy_work_interpretation(classification: str, signal_sessions: int, delegated_sessions: int) -> str:
+    if classification == "no_signal":
+        return "No heavy-work delegation prompts were observed in the selected window."
+    if classification == "misaligned":
+        return "Heavy-work prompts were observed, but none of those sessions spawned a subagent."
+    if classification == "aligned":
+        return "Every session with a heavy-work prompt also spawned a subagent."
+    return (
+        f"{delegated_sessions} of {signal_sessions} heavy-work signal session(s) spawned a subagent; "
+        "delegation happened, but not consistently."
+    )
+
+
+def _build_trend_summary(current_report: Dict[str, object], previous_report: Optional[Dict[str, object]]) -> Dict[str, object]:
+    current_subagents = current_report.get("subagents", {}) if isinstance(current_report.get("subagents"), dict) else {}
+    current_workflow = current_report.get("workflow_signals", {}) if isinstance(current_report.get("workflow_signals"), dict) else {}
+    current_heavy = current_workflow.get("heavy_work_delegation", {}) if isinstance(current_workflow.get("heavy_work_delegation"), dict) else {}
+
+    previous_subagents = previous_report.get("subagents", {}) if previous_report and isinstance(previous_report.get("subagents"), dict) else {}
+    previous_workflow = previous_report.get("workflow_signals", {}) if previous_report and isinstance(previous_report.get("workflow_signals"), dict) else {}
+    previous_heavy = previous_workflow.get("heavy_work_delegation", {}) if isinstance(previous_workflow, dict) else {}
+
+    current_coverage = round(_safe_get_float(current_heavy, "session_coverage_rate"), 4)
+    previous_coverage = round(_safe_get_float(previous_heavy, "session_coverage_rate"), 4) if previous_report else None
+
+    metrics = {
+        "lifecycle_delta_spawn_minus_close": _compare_metric(
+            _safe_get_int(current_subagents, "lifecycle_delta_spawn_minus_close"),
+            _safe_get_int(previous_subagents, "lifecycle_delta_spawn_minus_close") if previous_report else None,
+        ),
+        "open_sessions": _compare_metric(
+            _safe_get_int(current_subagents, "open_sessions"),
+            _safe_get_int(previous_subagents, "open_sessions") if previous_report else None,
+        ),
+        "broad_scan_bypasses": _compare_metric(
+            _safe_get_int(current_workflow, "broad_scan_bypasses"),
+            _safe_get_int(previous_workflow, "broad_scan_bypasses") if previous_report else None,
+        ),
+        "heavy_work_signal_sessions_without_spawn": _compare_metric(
+            _safe_get_int(current_heavy, "signal_sessions_without_spawn"),
+            _safe_get_int(previous_heavy, "signal_sessions_without_spawn") if previous_report else None,
+        ),
+        "heavy_work_signal_session_coverage_x10000": _compare_metric(
+            int(current_coverage * 10000),
+            int(previous_coverage * 10000) if previous_coverage is not None else None,
+            bigger_is_worse=False,
+        ),
+    }
+
+    worsened = [name for name, item in metrics.items() if item["status"] == "worsened"]
+    improved = [name for name, item in metrics.items() if item["status"] == "improved"]
+
+    if previous_report is None:
+        overall = "first_run"
+    elif worsened and improved:
+        overall = "mixed"
+    elif worsened:
+        overall = "worsening"
+    elif improved:
+        overall = "improving"
+    else:
+        overall = "stable"
+
+    signals = []
+    for name, item in metrics.items():
+        if name == "heavy_work_signal_session_coverage_x10000":
+            current_value = current_coverage
+            previous_value = previous_coverage
+            delta = None if previous_value is None else round(current_value - previous_value, 4)
+        else:
+            current_value = item["current"]
+            previous_value = item["previous"]
+            delta = item["delta"]
+        signals.append(
+            {
+                "metric": name,
+                "status": item["status"],
+                "current": current_value,
+                "previous": previous_value,
+                "delta": delta,
+            }
+        )
+
+    return {
+        "baseline_report": str(previous_report.get("report_name") or previous_report.get("generated_at") or "") if previous_report else "",
+        "overall": overall,
+        "signals": signals,
+    }
+
+
+def _report_classification(action_policy: str, trend_overall: str, heavy_classification: str) -> str:
+    if trend_overall == "first_run":
+        return "new"
+    has_open_issue = action_policy == "triage" or heavy_classification in {"misaligned", "partial"}
+    if has_open_issue:
+        if trend_overall in {"worsening", "mixed"}:
+            return "worse"
+        if trend_overall == "improving":
+            return "improved"
+        return "repeated"
+    if trend_overall == "improving":
+        return "improved"
+    if trend_overall == "stable":
+        return "stable"
+    if trend_overall == "worsening":
+        return "worse"
     return "observe"
 
 
@@ -138,6 +311,8 @@ def build_report(
     cwd_activity = Counter()
     project_context = {}
     per_session_subagents = defaultdict(lambda: {"spawn_agent": 0, "wait_agent": 0, "close_agent": 0})
+    per_session_heavy_signals = Counter()
+    closure = Counter()
     heavy_work_delegation_signals = 0
     broad_scan_bypasses = 0
     broad_scan_blocks = 0
@@ -176,8 +351,23 @@ def build_report(
         if event_type == "transcript_token_count":
             totals["token_count_events"] += 1
 
+        if row_dict.get("assistant_work_done", False):
+            closure["work_done_messages"] += 1
+            if row_dict.get("assistant_has_acceptance_footer", False):
+                closure["acceptance_footer_present"] += 1
+            else:
+                closure["work_done_missing_acceptance_footer"] += 1
+            if row_dict.get("assistant_acceptance_footer_complete", False):
+                closure["acceptance_footer_complete"] += 1
+            elif row_dict.get("assistant_has_acceptance_footer", False):
+                closure["acceptance_footer_partial"] += 1
+            if row_dict.get("assistant_subagent_used", False) and not row_dict.get("assistant_has_subagent_lifecycle", False):
+                closure["work_done_missing_subagent_status"] += 1
+
         if event_type == "orchestrator_user_prompt" and status == "warn":
             heavy_work_delegation_signals += 1
+            if session_id:
+                per_session_heavy_signals[session_id] += 1
 
         if event_type == "orchestrator_pre_tool_use" and status == "blocked" and str(row_dict.get("reason")) == "broad_scan_detected":
             broad_scan_blocks += 1
@@ -213,14 +403,44 @@ def build_report(
     unclosed_delta = spawn_count - close_count
     total_tool_calls = max(1, tool_calls.total())
     delegation_rate = _safe_divide(spawn_count, total_tool_calls)
-    total_heavy_signals = max(1, heavy_work_delegation_signals)
-    heavy_signal_delegation_rate = _safe_divide(spawn_count, total_heavy_signals)
+    legacy_spawn_per_heavy_signal = _safe_divide(spawn_count, max(1, heavy_work_delegation_signals))
 
     open_session_count = 0
     for stats in per_session_subagents.values():
         if stats["spawn_agent"] > stats["close_agent"]:
             open_session_count += 1
-    action_policy = _action_policy(unclosed_delta, broad_scan_bypasses)
+
+    heavy_signal_sessions = 0
+    heavy_signal_sessions_with_spawn = 0
+    heavy_signal_session_spawns = 0
+    for session_id, signal_count in per_session_heavy_signals.items():
+        if signal_count <= 0:
+            continue
+        heavy_signal_sessions += 1
+        session_spawn_count = per_session_subagents[session_id]["spawn_agent"]
+        heavy_signal_session_spawns += session_spawn_count
+        if session_spawn_count > 0:
+            heavy_signal_sessions_with_spawn += 1
+
+    heavy_signal_sessions_without_spawn = heavy_signal_sessions - heavy_signal_sessions_with_spawn
+    heavy_signal_session_coverage = _safe_divide(heavy_signal_sessions_with_spawn, max(1, heavy_signal_sessions))
+    avg_spawns_per_signal_session = _safe_divide(heavy_signal_session_spawns, max(1, heavy_signal_sessions))
+    avg_spawns_per_delegated_signal_session = _safe_divide(
+        heavy_signal_session_spawns, max(1, heavy_signal_sessions_with_spawn)
+    )
+    heavy_signal_classification = _classify_heavy_work_signal(
+        heavy_work_delegation_signals, heavy_signal_sessions, heavy_signal_sessions_with_spawn
+    )
+    heavy_signal_interpretation = _heavy_work_interpretation(
+        heavy_signal_classification, heavy_signal_sessions, heavy_signal_sessions_with_spawn
+    )
+
+    action_policy = _action_policy(
+        unclosed_delta,
+        broad_scan_bypasses,
+        int(closure.get("work_done_missing_acceptance_footer", 0)),
+        int(closure.get("work_done_missing_subagent_status", 0)),
+    )
     project_context_available = any(
         isinstance(item, dict) and bool(item.get("available")) for item in project_context.values()
     )
@@ -233,6 +453,7 @@ def build_report(
 
     data = {
         "generated_at": now.isoformat().replace("+00:00", "Z"),
+        "report_name": f"subagent-workflow-{report_id}.json",
         "codex_home": str(codex_home) if include_paths else "[redacted]",
         "since_days": since_days,
         "paths_included": include_paths,
@@ -259,20 +480,49 @@ def build_report(
             "open_sessions": open_session_count,
             "lifecycle_delta_spawn_minus_close": unclosed_delta,
             "spawn_per_tool_call": delegation_rate,
-            "spawn_per_heavy_signal": heavy_signal_delegation_rate,
+            "spawn_per_heavy_signal": avg_spawns_per_signal_session,
+            "spawn_per_heavy_signal_legacy": legacy_spawn_per_heavy_signal,
         },
         "workflow_signals": {
             "delegation_rate": delegation_rate,
-            "heavy_work_delegation_rate": heavy_signal_delegation_rate,
+            "heavy_work_delegation_rate": heavy_signal_session_coverage,
             "heavy_work_delegation_signals": heavy_work_delegation_signals,
             "broad_scan_blocks": broad_scan_blocks,
             "broad_scan_bypasses": broad_scan_bypasses,
+            "heavy_work_delegation": {
+                "classification": heavy_signal_classification,
+                "signal_count": heavy_work_delegation_signals,
+                "signal_sessions": heavy_signal_sessions,
+                "signal_sessions_with_spawn": heavy_signal_sessions_with_spawn,
+                "signal_sessions_without_spawn": heavy_signal_sessions_without_spawn,
+                "session_coverage_rate": heavy_signal_session_coverage,
+                "avg_spawns_per_signal_session": avg_spawns_per_signal_session,
+                "avg_spawns_per_delegated_signal_session": avg_spawns_per_delegated_signal_session,
+                "spawn_count_in_signal_sessions": heavy_signal_session_spawns,
+                "legacy_spawn_per_signal_rate": legacy_spawn_per_heavy_signal,
+                "interpretation": heavy_signal_interpretation,
+            },
+        },
+        "closure_signals": {
+            "work_done_messages": int(closure.get("work_done_messages", 0)),
+            "acceptance_footer_present": int(closure.get("acceptance_footer_present", 0)),
+            "acceptance_footer_complete": int(closure.get("acceptance_footer_complete", 0)),
+            "acceptance_footer_partial": int(closure.get("acceptance_footer_partial", 0)),
+            "work_done_missing_acceptance_footer": int(closure.get("work_done_missing_acceptance_footer", 0)),
+            "work_done_missing_subagent_status": int(closure.get("work_done_missing_subagent_status", 0)),
         },
         "tool_calls": dict(tool_calls),
         "project_context": project_context,
         "samples": samples,
         "facts": facts_for_report,
     }
+    previous_report = _load_previous_report(reports_root, report_id)
+    data["trend"] = _build_trend_summary(data, previous_report)
+    data["classification"] = _report_classification(
+        action_policy,
+        str(data["trend"].get("overall") or "unknown"),
+        heavy_signal_classification,
+    )
 
     json_path = reports_root / f"subagent-workflow-{report_id}.json"
     with json_path.open("w", encoding="utf-8") as stream:
@@ -284,6 +534,7 @@ def build_report(
         "- Reviewer: `subagent-workflow`",
         "- Standard: `default-v1`",
         f"- Action policy: `{action_policy}`",
+        f"- Classification: `{data['classification']}`",
         f"- Project context available: {str(project_context_available).lower()}",
         f"- Scope: {codex_home if include_paths else '[redacted]'}",
         f"- Window: last {since_days} day(s)",
@@ -299,15 +550,39 @@ def build_report(
         f"- Unclosed delta: {unclosed_delta}",
         f"- Open sessions with unclosed subagents: {open_session_count}",
         "",
+        "## Closure signals",
+        f"- Work-done replies: {closure.get('work_done_messages', 0)}",
+        f"- Acceptance footer complete: {closure.get('acceptance_footer_complete', 0)}",
+        f"- Acceptance footer partial: {closure.get('acceptance_footer_partial', 0)}",
+        f"- Missing acceptance footer on work-done replies: {closure.get('work_done_missing_acceptance_footer', 0)}",
+        f"- Missing subagent lifecycle status on work-done replies: {closure.get('work_done_missing_subagent_status', 0)}",
+        "",
         "## Delegation signals",
         f"- Delegation rate (spawn / tool calls): {delegation_rate}",
-        f"- Delegation rate (spawn / heavy-work signals): {heavy_signal_delegation_rate}",
         f"- Heavy-work delegation signals: {heavy_work_delegation_signals}",
+        f"- Heavy-work signal session coverage: {heavy_signal_sessions_with_spawn}/{heavy_signal_sessions} ({heavy_signal_session_coverage})",
+        f"- Heavy-work delegation classification: {heavy_signal_classification}",
+        f"- Heavy-work interpretation: {heavy_signal_interpretation}",
+        f"- Average spawns per heavy-work signal session: {avg_spawns_per_signal_session}",
+        f"- Legacy spawn / heavy-work signal ratio: {legacy_spawn_per_heavy_signal}",
         f"- Broad-scan blocks: {broad_scan_blocks}",
         f"- Broad-scan bypass signals (observed): {broad_scan_bypasses}",
         "",
+        "## Trend",
+        f"- overall: {data['trend'].get('overall', 'unknown')}",
+        f"- baseline_report: {data['trend'].get('baseline_report') or 'none'}",
+        "",
         "## Project context",
     ]
+
+    for item in data["trend"].get("signals", []):
+        markdown_lines.insert(
+            len(markdown_lines) - 2,
+            (
+                f"- {item.get('metric')}: {item.get('status')} "
+                f"(current={item.get('current')}, previous={item.get('previous')}, delta={item.get('delta')})"
+            ),
+        )
 
     for key in sorted(project_context):
         item = project_context[key]
@@ -338,6 +613,9 @@ def build_report(
         "totals": dict(totals),
         "subagents": data["subagents"],
         "workflow_signals": data["workflow_signals"],
+        "closure_signals": data["closure_signals"],
+        "trend": data["trend"],
+        "classification": data["classification"],
     }
 
 

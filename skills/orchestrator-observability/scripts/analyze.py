@@ -128,8 +128,14 @@ def _build_suggestions(
         suggestions.append("Require explicit verification in final assistant messages before Stop.")
     if acceptance.get("work_done_missing_subagent_status", 0) > 0:
         suggestions.append("Require subagent lifecycle status in final assistant messages when subagents were used.")
+    if acceptance.get("work_done_missing_acceptance_footer", 0) > 0:
+        suggestions.append("Require the full four-field acceptance footer when work was done.")
+    if acceptance.get("acceptance_footer_partial", 0) > 0:
+        suggestions.append("Acceptance footers are present but incomplete; fill all four footer fields.")
     if acceptance.get("structured_acceptance_missing_verification", 0) > 0:
         suggestions.append("Structured acceptance from stop hook reports verification was requested but not present.")
+    if acceptance.get("footer_subagent_fail", 0) > 0:
+        suggestions.append("Subagent lifecycle text and subagent_status disagree in the acceptance footer.")
     if subagents.get("lifecycle_delta_spawn_minus_close", 0) > 0:
         suggestions.append("Spawned subagents exceed closes; check for missing close messages.")
     if noise.get("large_tool_outputs", 0) > 0:
@@ -140,6 +146,134 @@ def _build_suggestions(
         suggestions.append("No critical suggestions generated from the selected window.")
 
     return suggestions
+
+
+def _safe_get_int(source: Dict[str, object], key: str) -> int:
+    try:
+        return int(source.get(key, 0) or 0)
+    except Exception:
+        return 0
+
+
+def _load_previous_report(reports_root: Path, report_id: Optional[str]) -> Optional[Dict[str, object]]:
+    candidates = []
+    for path in reports_root.glob("orchestrator-observability-*.json"):
+        if report_id and path.name == f"orchestrator-observability-{report_id}.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        generated_at = payload.get("generated_at")
+        candidates.append((str(generated_at or ""), path.stat().st_mtime, payload))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _compare_metric(current: int, previous: Optional[int], *, bigger_is_worse: bool = True) -> Dict[str, object]:
+    if previous is None:
+        return {"current": current, "previous": None, "delta": None, "status": "first_observation"}
+    delta = current - previous
+    if delta == 0:
+        status = "unchanged"
+    elif bigger_is_worse:
+        status = "worsened" if delta > 0 else "improved"
+    else:
+        status = "improved" if delta > 0 else "worsened"
+    return {"current": current, "previous": previous, "delta": delta, "status": status}
+
+
+def _build_trend_summary(current_report: Dict[str, object], previous_report: Optional[Dict[str, object]]) -> Dict[str, object]:
+    current_totals = current_report.get("totals", {}) if isinstance(current_report.get("totals"), dict) else {}
+    current_subagents = current_report.get("subagents", {}) if isinstance(current_report.get("subagents"), dict) else {}
+    current_acceptance = current_report.get("acceptance", {}) if isinstance(current_report.get("acceptance"), dict) else {}
+
+    previous_totals = previous_report.get("totals", {}) if previous_report and isinstance(previous_report.get("totals"), dict) else {}
+    previous_subagents = previous_report.get("subagents", {}) if previous_report and isinstance(previous_report.get("subagents"), dict) else {}
+    previous_acceptance = previous_report.get("acceptance", {}) if previous_report and isinstance(previous_report.get("acceptance"), dict) else {}
+
+    current_orchestrator = _safe_get_int(current_totals, "orchestrator_events")
+    previous_orchestrator = _safe_get_int(previous_totals, "orchestrator_events") if previous_report else None
+    current_blocked_ratio = round(
+        (_safe_get_int(current_totals, "blocked_orchestrator_events") / current_orchestrator) if current_orchestrator else 0.0,
+        4,
+    )
+    previous_blocked_ratio = None
+    if previous_report:
+        prev_total = _safe_get_int(previous_totals, "orchestrator_events")
+        previous_blocked_ratio = round(
+            (_safe_get_int(previous_totals, "blocked_orchestrator_events") / prev_total) if prev_total else 0.0,
+            4,
+        )
+
+    metrics = {
+        "blocked_ratio_x10000": _compare_metric(
+            int(current_blocked_ratio * 10000),
+            int(previous_blocked_ratio * 10000) if previous_blocked_ratio is not None else None,
+        ),
+        "lifecycle_delta_spawn_minus_close": _compare_metric(
+            _safe_get_int(current_subagents, "lifecycle_delta_spawn_minus_close"),
+            _safe_get_int(previous_subagents, "lifecycle_delta_spawn_minus_close") if previous_report else None,
+        ),
+        "work_done_missing_verification": _compare_metric(
+            _safe_get_int(current_acceptance, "work_done_missing_verification"),
+            _safe_get_int(previous_acceptance, "work_done_missing_verification") if previous_report else None,
+        ),
+        "work_done_missing_subagent_status": _compare_metric(
+            _safe_get_int(current_acceptance, "work_done_missing_subagent_status"),
+            _safe_get_int(previous_acceptance, "work_done_missing_subagent_status") if previous_report else None,
+        ),
+        "work_done_missing_acceptance_footer": _compare_metric(
+            _safe_get_int(current_acceptance, "work_done_missing_acceptance_footer"),
+            _safe_get_int(previous_acceptance, "work_done_missing_acceptance_footer") if previous_report else None,
+        ),
+        "acceptance_footer_partial": _compare_metric(
+            _safe_get_int(current_acceptance, "acceptance_footer_partial"),
+            _safe_get_int(previous_acceptance, "acceptance_footer_partial") if previous_report else None,
+        ),
+    }
+
+    worsened = [name for name, item in metrics.items() if item["status"] == "worsened"]
+    improved = [name for name, item in metrics.items() if item["status"] == "improved"]
+
+    if previous_report is None:
+        overall = "first_run"
+    elif worsened and improved:
+        overall = "mixed"
+    elif worsened:
+        overall = "worsening"
+    elif improved:
+        overall = "improving"
+    else:
+        overall = "stable"
+
+    signals = []
+    for name, item in metrics.items():
+        if name == "blocked_ratio_x10000":
+            current_value = current_blocked_ratio
+            previous_value = previous_blocked_ratio
+        else:
+            current_value = item["current"]
+            previous_value = item["previous"]
+        signals.append(
+            {
+                "metric": name,
+                "status": item["status"],
+                "current": current_value,
+                "previous": previous_value,
+                "delta": item["delta"] if name != "blocked_ratio_x10000" else (
+                    None if previous_value is None else round(current_value - previous_value, 4)
+                ),
+            }
+        )
+
+    return {
+        "baseline_report": str(previous_report.get("report_name") or previous_report.get("generated_at") or "") if previous_report else "",
+        "overall": overall,
+        "signals": signals,
+    }
 
 
 def _append_daily_summary(markdown_lines: List[str], daily: Dict[str, int], since_days: int) -> None:
@@ -213,6 +347,8 @@ def build_report(
         structured = fact_to_dict(row).get("acceptance", {}) if not isinstance(row, dict) else row_dict.get("acceptance", {})
         if isinstance(structured, dict) and structured.get("source"):
             structured_acceptance[f"source_{structured.get('source')}"] += 1
+            if structured.get("is_structured_complete"):
+                structured_acceptance["structured_acceptance_complete"] += 1
             if structured.get("has_work_done_signal"):
                 structured_acceptance["work_done_signals"] += 1
             if structured.get("source") == "structured" and structured.get("has_verification_signal"):
@@ -221,6 +357,14 @@ def build_report(
                 structured_acceptance["structured_acceptance_missing_verification"] += 1
             if structured.get("has_subagent_signal"):
                 structured_acceptance["subagent_signals"] += 1
+            if structured.get("footer_verification_fail"):
+                structured_acceptance["footer_verification_fail"] += 1
+            if structured.get("footer_review_fail"):
+                structured_acceptance["footer_review_fail"] += 1
+            if structured.get("footer_subagent_fail"):
+                structured_acceptance["footer_subagent_fail"] += 1
+            if structured.get("footer_risk_fail"):
+                structured_acceptance["footer_risk_fail"] += 1
 
         if event_type.startswith("orchestrator_"):
             totals["orchestrator_events"] += 1
@@ -282,6 +426,18 @@ def build_report(
                 acceptance["work_done_missing_verification"] += 1
             if row_dict.get("assistant_work_done", False) and not row_dict.get("assistant_has_subagent_status", False):
                 acceptance["work_done_missing_subagent_status"] += 1
+            if row_dict.get("assistant_has_acceptance_footer", False):
+                acceptance["acceptance_footer_present"] += 1
+            if row_dict.get("assistant_acceptance_footer_complete", False):
+                acceptance["acceptance_footer_complete"] += 1
+            footer_field_count = int(row_dict.get("assistant_acceptance_footer_field_count", 0) or 0)
+            if row_dict.get("assistant_has_acceptance_footer", False) and not row_dict.get("assistant_acceptance_footer_complete", False):
+                acceptance["acceptance_footer_partial"] += 1
+                acceptance["acceptance_footer_missing_fields"] += max(0, 4 - footer_field_count)
+            if row_dict.get("assistant_work_done", False) and not row_dict.get("assistant_has_acceptance_footer", False):
+                acceptance["work_done_missing_acceptance_footer"] += 1
+            if row_dict.get("assistant_work_done", False) and row_dict.get("assistant_has_verification", False) and not row_dict.get("assistant_acceptance_footer_complete", False):
+                acceptance["heuristic_only_completion"] += 1
         if len(samples) < max_samples:
             samples.append(
                 {
@@ -298,6 +454,11 @@ def build_report(
     acceptance["structured_acceptance_missing_verification"] = int(
         structured_acceptance.get("structured_acceptance_missing_verification", 0)
     )
+    acceptance["structured_acceptance_coverage"] = int(structured_acceptance.get("structured_acceptance_complete", 0))
+    acceptance["footer_verification_fail"] = int(structured_acceptance.get("footer_verification_fail", 0))
+    acceptance["footer_review_fail"] = int(structured_acceptance.get("footer_review_fail", 0))
+    acceptance["footer_subagent_fail"] = int(structured_acceptance.get("footer_subagent_fail", 0))
+    acceptance["footer_risk_fail"] = int(structured_acceptance.get("footer_risk_fail", 0))
 
     if not report_id:
         report_id = now.strftime("%Y%m%dT%H%M%SZ")
@@ -312,6 +473,7 @@ def build_report(
 
     data = {
         "generated_at": now.isoformat().replace("+00:00", "Z"),
+        "report_name": f"orchestrator-observability-{report_id}.json",
         "codex_home": str(codex_home) if include_paths else "[redacted]",
         "since_days": since_days,
         "paths_included": include_paths,
@@ -343,6 +505,8 @@ def build_report(
         "samples": samples,
         "facts": facts_for_report,
     }
+    previous_report = _load_previous_report(reports_root, report_id)
+    data["trend"] = _build_trend_summary(data, previous_report)
     data["suggestions"] = _build_suggestions(
         data["totals"],
         data["acceptance"],
@@ -373,6 +537,8 @@ def build_report(
         f"- Subagent spawn/wait/close: {subagents.get('spawn_agent', 0)}/{subagents.get('wait_agent', 0)}/{subagents.get('close_agent', 0)}",
         f"- Subagent lifecycle delta: {subagents.get('lifecycle_delta_spawn_minus_close', 0)}",
         f"- Large tool outputs: {noise.get('large_tool_outputs', 0)}",
+        f"- Acceptance footer complete: {acceptance.get('acceptance_footer_complete', 0)}",
+        f"- Acceptance footer missing on work-done replies: {acceptance.get('work_done_missing_acceptance_footer', 0)}",
         "",
         "## Orchestrator events",
     ]
@@ -406,6 +572,16 @@ def build_report(
         markdown_lines.append("## Structured acceptance signals")
         for name, value in sorted(structured_acceptance.items()):
             markdown_lines.append(f"- {name}: {value}")
+
+    markdown_lines.append("")
+    markdown_lines.append("## Trend")
+    markdown_lines.append(f"- overall: {data['trend'].get('overall', 'unknown')}")
+    baseline_report = data["trend"].get("baseline_report") or ""
+    markdown_lines.append(f"- baseline_report: {baseline_report or 'none'}")
+    for item in data["trend"].get("signals", []):
+        markdown_lines.append(
+            f"- {item.get('metric')}: {item.get('status')} (current={item.get('current')}, previous={item.get('previous')}, delta={item.get('delta')})"
+        )
 
     markdown_lines.append("")
     markdown_lines.append("## Project context")
@@ -450,6 +626,7 @@ def build_report(
         "subagents": dict(subagents),
         "acceptance": dict(acceptance),
         "noise": dict(noise),
+        "trend": data["trend"],
     }
 
 

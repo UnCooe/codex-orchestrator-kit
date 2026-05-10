@@ -149,9 +149,9 @@ foreach ($file in $requiredFiles) {
     }
 }
 
-$turnstateSkillPath = Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md'
-if (Test-Path $turnstateSkillPath) {
-    throw 'Default install should not install the optional Turnstate reviewer pack.'
+$projectSpecificSkillPath = Join-Path $AgentsHome 'skills\project-specific-observability\SKILL.md'
+if (Test-Path $projectSpecificSkillPath) {
+    throw 'Default install should not install project-specific reviewer packs.'
 }
 
 $reviewProfileTemplate = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'templates\review-profile.toml')
@@ -164,12 +164,34 @@ if ($enabledReviewers.Count -ne 1 -or $enabledReviewers[0] -ne 'subagent-workflo
     throw "Default review-profile template should enable only subagent-workflow; got: $($enabledReviewers -join ', ')"
 }
 
-& (Join-Path $root 'install.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome -IncludeTurnstate | Out-Null
-if (-not (Test-Path $turnstateSkillPath)) {
-    throw 'IncludeTurnstate did not install the optional Turnstate reviewer skill.'
+$demoPack = Join-Path $env:TEMP ('reviewer-pack-smoke-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $demoPack 'skills\demo-observability\scripts') -Force | Out-Null
+@'
+---
+name: demo-observability
+description: Smoke test external reviewer pack.
+---
+
+# Demo Observability
+'@ | Set-Content -Path (Join-Path $demoPack 'skills\demo-observability\SKILL.md') -Encoding utf8
+'print("demo")' | Set-Content -Path (Join-Path $demoPack 'skills\demo-observability\scripts\demo.py') -Encoding utf8
+& (Join-Path $root 'install-reviewer-pack.ps1') -PackPath $demoPack -AgentsHome $AgentsHome | Out-Null
+if (-not (Test-Path (Join-Path $AgentsHome 'skills\demo-observability\SKILL.md'))) {
+    throw 'install-reviewer-pack did not install the external reviewer skill.'
 }
-if (-not (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\scripts\turnstate_report.py'))) {
-    throw 'IncludeTurnstate did not install turnstate_report.py.'
+if (-not (Test-Path (Join-Path $AgentsHome 'skills\demo-observability\scripts\demo.py'))) {
+    throw 'install-reviewer-pack did not install reviewer scripts.'
+}
+
+$registeredProject = Join-Path $env:TEMP ('registered-project-smoke-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $registeredProject -Force | Out-Null
+& (Join-Path $root 'register-project.ps1') -ProjectPath $registeredProject -ProjectId 'smoke-project' -Reviewers @('subagent-workflow','demo-reviewer') | Out-Null
+$registeredProfile = Get-Content -Raw -Encoding UTF8 (Join-Path $registeredProject '.codex\review-profile.toml')
+if ($registeredProfile -notmatch 'project_id = "smoke-project"' -or $registeredProfile -notmatch '"subagent-workflow"' -or $registeredProfile -notmatch '"demo-reviewer"') {
+    throw 'register-project did not write expected review profile.'
+}
+if (-not (Test-Path (Join-Path $registeredProject '.codex\project-context.md'))) {
+    throw 'register-project did not write project context template.'
 }
 
 $userPrompt = Join-Path $CodexHome 'hooks\orchestrator_user_prompt.py'
@@ -234,6 +256,12 @@ Assert-JsonField -JsonText $stopMissingVerification -Predicate {
     $value.decision -eq 'block'
 } -Message 'Stop hook did not require verification for work-done message.'
 
+$stopPartialFooter = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=pass\nreview_status=pass"}'
+Assert-JsonField -JsonText $stopPartialFooter -Predicate {
+    param($value)
+    $value.decision -eq 'block' -and $value.reason -like '*Acceptance footer is incomplete*'
+} -Message 'Stop hook did not block partial acceptance footer.'
+
 $transcript = Join-Path $CodexHome 'transcript-subagent.jsonl'
 $transcriptContent = @(
     '{"payload":{"type":"message","role":"user","content":"implement a feature"}}',
@@ -248,12 +276,21 @@ Assert-JsonField -JsonText $stopLifecycleOutput -Predicate {
     $value.decision -eq 'block'
 } -Message 'Stop hook did not require subagent lifecycle status.'
 
-$stopPassPayload = @{ transcript_path = $transcript; last_assistant_message = 'implemented the requested change in the portable kit and updated installer behavior. Verification: tests run. Subagents: closed.' } | ConvertTo-Json -Compress
+$stopPassPayload = @{
+    transcript_path = $transcript
+    last_assistant_message = @'
+implemented the requested change in the portable kit and updated installer behavior. Verification: tests run. Subagents: closed.
+verification_status=pass
+review_status=not_required
+subagent_status=closed
+risk_status=low
+'@
+} | ConvertTo-Json -Compress
 $stopPassOutput = Invoke-PythonHook -Script $stopHook -InputJson $stopPassPayload
 Assert-JsonField -JsonText $stopPassOutput -Predicate {
     param($value)
     $value.continue -eq $true
-} -Message 'Stop hook did not pass with verification and lifecycle status.'
+} -Message 'Stop hook did not pass with verification, lifecycle status, and structured acceptance footer.'
 
 $structuredAcceptanceMessage = @'
 implemented the requested change in the portable kit and updated installer behavior.
@@ -400,7 +437,6 @@ $contextSessionContent = @(
 $analyzer = Join-Path $AgentsHome 'skills\orchestrator-observability\scripts\analyze.py'
 $triage = Join-Path $AgentsHome 'skills\orchestrator-observability\scripts\triage.py'
 $subagentWorkflow = Join-Path $AgentsHome 'skills\orchestrator-observability\scripts\subagent_workflow.py'
-$turnstateReport = Join-Path $AgentsHome 'skills\turnstate-observability\scripts\turnstate_report.py'
 $reportId = ('smoke-' + [Guid]::NewGuid().ToString('N'))
 $python = Get-PythonCommand
 $unitArgs = @()
@@ -408,6 +444,7 @@ if ($python.Length -gt 1) {
     $unitArgs += $python[1..($python.Length - 1)]
 }
 & $python[0] @($unitArgs + (Join-Path $root 'tests\test_session_facts_since_days.py'))
+& $python[0] @($unitArgs + (Join-Path $root 'tests\test_acceptance_footer_and_triage.py'))
 $analyzerOutput = & $python[0] @($python[1..($python.Length - 1)] + $analyzer + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $reportId))
 $analyzerOutputObj = $analyzerOutput | ConvertFrom-Json
 if ($analyzerOutputObj.totals.orchestrator_events -lt 3) {
@@ -515,6 +552,14 @@ $structuredVerified = if ($structuredVerifiedProp) { $structuredVerifiedProp.Val
 if (-not $structuredVerified -or $structuredVerified -lt 1) {
     throw 'Analyzer structured acceptance counters did not count verified structured footer.'
 }
+$footerMissingProp = $reportObj.acceptance.PSObject.Properties | Where-Object { $_.Name -eq 'work_done_missing_acceptance_footer' } | Select-Object -First 1
+$footerMissing = if ($footerMissingProp) { $footerMissingProp.Value } else { 0 }
+if (-not $footerMissing -or $footerMissing -lt 1) {
+    throw 'Analyzer did not count missing acceptance footers on work-done replies.'
+}
+if (-not $reportObj.trend -or -not $reportObj.trend.overall) {
+    throw 'Analyzer did not emit trend summary.'
+}
 
 $subagentWorkflowReportId = ('smoke-subagent-' + [Guid]::NewGuid().ToString('N'))
 $subagentWorkflowOutput = & $python[0] @($python[1..($python.Length - 1)] + $subagentWorkflow + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $subagentWorkflowReportId))
@@ -536,51 +581,6 @@ if ($rawSubagentWorkflowText -match [regex]::Escape($contextProject) -or $rawSub
     throw 'Subagent workflow report leaked project context path or secret.'
 }
 
-$turnstateReportId = ('smoke-turnstate-' + [Guid]::NewGuid().ToString('N'))
-$turnstateOutput = & $python[0] @($python[1..($python.Length - 1)] + $turnstateReport + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $turnstateReportId))
-$turnstateOutputObj = $turnstateOutput | ConvertFrom-Json
-if ($turnstateOutputObj.sessions_seen -lt 1) {
-    throw 'Turnstate report did not see fixture sessions.'
-}
-
-$turnstateJsonReport = Join-Path (Join-Path $CodexHome 'turnstate-observability\reports') "turnstate-compliance-$turnstateReportId.json"
-$turnstateMdReport = Join-Path (Join-Path $CodexHome 'turnstate-observability\reports') "turnstate-compliance-$turnstateReportId.md"
-if (-not (Test-Path $turnstateJsonReport)) {
-    throw "Missing Turnstate JSON report: $turnstateJsonReport"
-}
-if (-not (Test-Path $turnstateMdReport)) {
-    throw "Missing Turnstate markdown report: $turnstateMdReport"
-}
-
-$turnstateReportObj = Get-Content -Raw -Encoding UTF8 $turnstateJsonReport | ConvertFrom-Json
-if ($turnstateReportObj.rule_profile -ne 'turnstate-default-v1') {
-    throw 'Turnstate report used an unexpected rule profile.'
-}
-if (-not ($turnstateReportObj.PSObject.Properties.Name -contains 'score')) {
-    throw 'Turnstate report missing score.'
-}
-if (-not ($turnstateReportObj.rule_failures.PSObject.Properties.Name -contains 'final_acceptance_present')) {
-    throw 'Turnstate report did not classify missing final acceptance verification.'
-}
-if (-not $turnstateReportObj.suggestions -or $turnstateReportObj.suggestions.Count -lt 1) {
-    throw 'Turnstate report did not include suggestions.'
-}
-$turnstateContextEntryProp = $turnstateReportObj.project_context.PSObject.Properties | Where-Object { $_.Name -eq $contextKey } | Select-Object -First 1
-$turnstateContextEntry = if ($turnstateContextEntryProp) { $turnstateContextEntryProp.Value } else { $null }
-if (-not $turnstateContextEntry -or -not $turnstateContextEntry.available) {
-    throw 'Turnstate report did not include available project context.'
-}
-if ($turnstateContextEntry.summary -match 'supersecret' -or $turnstateContextEntry.summary -match 'sk-1234567890abcdefghijklmnopqrstuvwxyz' -or $turnstateContextEntry.summary -notmatch '\[redacted\]') {
-    throw 'Turnstate project context summary was not redacted.'
-}
-$rawTurnstateReportText = Get-Content -Raw -Encoding UTF8 $turnstateJsonReport
-if ($rawTurnstateReportText -match 'please implement') {
-    throw 'Turnstate report leaked assistant message content.'
-}
-if ($rawTurnstateReportText -match 'C:/repo' -or $rawTurnstateReportText -match 'D:/repo' -or $rawTurnstateReportText -match 'E:\\repo' -or $rawTurnstateReportText -match [regex]::Escape($CodexHome) -or $rawTurnstateReportText -match [regex]::Escape($contextProject) -or $rawTurnstateReportText -match 'sk-1234567890abcdefghijklmnopqrstuvwxyz') {
-    throw 'Turnstate report leaked full local paths while --include-paths was not set.'
-}
-
 $triageReportDir = Join-Path $CodexHome 'orchestrator-observability\reports'
 
 $highReportPath = Join-Path $triageReportDir 'orchestrator-observability-high-smoke.json'
@@ -595,6 +595,20 @@ $highReport = @{
     acceptance = @{
         work_done_missing_verification = 0
         work_done_missing_subagent_status = 0
+        work_done_missing_acceptance_footer = 2
+        acceptance_footer_partial = 1
+    }
+    trend = @{
+        overall = 'worsening'
+        signals = @(
+            @{
+                metric = 'work_done_missing_acceptance_footer'
+                status = 'worsened'
+                current = 2
+                previous = 0
+                delta = 2
+            }
+        )
     }
     suggestions = @('High blocked hook ratio needs review.')
 }
@@ -657,7 +671,14 @@ $lowReport = @{
     acceptance = @{
         work_done_missing_verification = 0
         work_done_missing_subagent_status = 0
+        work_done_missing_acceptance_footer = 0
+        acceptance_footer_partial = 0
     }
+    trend = @{
+        overall = 'stable'
+        signals = @()
+    }
+    project_context_available = $true
     suggestions = @('Update guidance wording.')
 }
 $lowReport | ConvertTo-Json -Depth 10 | Set-Content -Path $lowReportPath -Encoding utf8
@@ -738,6 +759,12 @@ $benignAutomationReport = @{
     acceptance = @{
         work_done_missing_verification = 0
         work_done_missing_subagent_status = 0
+        work_done_missing_acceptance_footer = 0
+        acceptance_footer_partial = 0
+    }
+    trend = @{
+        overall = 'stable'
+        signals = @()
     }
     suggestions = @('Automation looks stable; reduce error message verbosity in summaries.')
 }
@@ -746,6 +773,52 @@ $benignAutomationTriageOutput = & $python[0] @($python[1..($python.Length - 1)] 
 $benignAutomationTriage = $benignAutomationTriageOutput | ConvertFrom-Json
 if ($benignAutomationTriage.severity -ne 'none') {
     throw "Benign automation wording should not trigger high-risk triage: $benignAutomationTriageOutput"
+}
+
+$recoveringReportPath = Join-Path $triageReportDir 'orchestrator-observability-recovering-smoke.json'
+$recoveringReport = @{
+    totals = @{
+        orchestrator_events = 8
+        blocked_orchestrator_events = 2
+    }
+    subagents = @{
+        lifecycle_delta_spawn_minus_close = 0
+    }
+    acceptance = @{
+        work_done_missing_verification = 0
+        work_done_missing_subagent_status = 0
+        work_done_missing_acceptance_footer = 1
+        acceptance_footer_partial = 0
+    }
+    trend = @{
+        overall = 'improving'
+        signals = @(
+            @{
+                metric = 'work_done_missing_acceptance_footer'
+                status = 'improved'
+                current = 1
+                previous = 3
+                delta = -2
+            }
+        )
+    }
+    project_context_available = $true
+    suggestions = @('Tighten footer reminders.')
+}
+$recoveringReport | ConvertTo-Json -Depth 10 | Set-Content -Path $recoveringReportPath -Encoding utf8
+$recoveringPatchPath = Join-Path $triageReportDir 'orchestrator-observability-recovering-smoke.patch.diff'
+@'
+diff --git a/docs/proposal-guidance.md b/docs/proposal-guidance.md
+--- a/docs/proposal-guidance.md
++++ b/docs/proposal-guidance.md
+@@ -1 +1,2 @@
+ proposal guidance
++footer reminder follow-up
+'@ | Set-Content -Path $recoveringPatchPath -Encoding utf8
+$recoveringTriageOutput = & $python[0] @($python[1..($python.Length - 1)] + $triage + @('--codex-home', $CodexHome, '--since-days', 3, '--report', $recoveringReportPath))
+$recoveringTriage = $recoveringTriageOutput | ConvertFrom-Json
+if ($recoveringTriage.severity -ne 'low' -or $recoveringTriage.summary.classification -ne 'improved') {
+    throw "Recovering trend should downgrade to low-risk proposal: $recoveringTriageOutput"
 }
 
 $applyPatchReportPath = Join-Path $triageReportDir 'orchestrator-observability-applypatch-smoke.json'
@@ -789,8 +862,8 @@ if (Test-Path (Join-Path $AgentsHome 'skills\orchestrator\SKILL.md')) {
 if (Test-Path (Join-Path $AgentsHome 'skills\orchestrator-observability\SKILL.md')) {
     throw 'Uninstall did not remove orchestrator observability skill.'
 }
-if (-not (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md'))) {
-    throw 'Default uninstall should preserve optional Turnstate reviewer pack.'
+if (-not (Test-Path (Join-Path $AgentsHome 'skills\demo-observability\SKILL.md'))) {
+    throw 'Default uninstall should preserve external reviewer packs.'
 }
 if (Test-Path (Join-Path $CodexHome 'hooks\orchestrator_user_prompt.py')) {
     throw 'Uninstall did not remove orchestrator hook script.'
@@ -804,11 +877,6 @@ if ($uninstalledHooks -match 'orchestrator_(pre_tool_use|post_tool_use|stop|user
 }
 if ($uninstalledHooks -notmatch 'pre-existing-user-prompt\.py' -or $uninstalledHooks -notmatch 'pre-existing-pre-tool\.py') {
     throw 'Uninstall removed the pre-existing hook entry.'
-}
-
-& (Join-Path $root 'uninstall.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome -RemoveTurnstate | Out-Null
-if (Test-Path (Join-Path $AgentsHome 'skills\turnstate-observability\SKILL.md')) {
-    throw 'RemoveTurnstate did not remove the optional Turnstate reviewer pack.'
 }
 
 Write-Host "smoke-test passed"

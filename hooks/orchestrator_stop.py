@@ -92,6 +92,10 @@ def parse_acceptance_footer(message: str) -> dict[str, str]:
     return values
 
 
+def missing_acceptance_fields(fields: dict[str, str]) -> list[str]:
+    return [field for field in ACCEPTANCE_FIELDS if not str(fields.get(field, "")).strip()]
+
+
 def acceptance_payload(
     source: str,
     fields: dict[str, str],
@@ -100,11 +104,15 @@ def acceptance_payload(
     has_verification_signal: bool,
     has_subagent_signal: bool,
 ) -> dict[str, object]:
+    missing_fields = missing_acceptance_fields(fields)
     payload: dict[str, object] = {
         "source": source,
         "has_work_done_signal": has_work_done_signal,
         "has_verification_signal": has_verification_signal,
         "has_subagent_signal": has_subagent_signal,
+        "footer_field_count": len(fields),
+        "footer_complete": not missing_fields and len(fields) == len(ACCEPTANCE_FIELDS),
+        "footer_missing_fields": missing_fields,
     }
     for field in ACCEPTANCE_FIELDS:
         payload[field] = fields.get(field, "")
@@ -161,7 +169,13 @@ def main() -> int:
     used_subagents = transcript_has_subagent_signal(payload.get("transcript_path"))
     has_subagent_lifecycle = matches_any(SUBAGENT_LIFECYCLE, message)
     acceptance_fields = parse_acceptance_footer(message)
-    acceptance_source = "structured" if len(acceptance_fields) == len(ACCEPTANCE_FIELDS) else "missing"
+    footer_missing = missing_acceptance_fields(acceptance_fields)
+    if len(acceptance_fields) == len(ACCEPTANCE_FIELDS) and not footer_missing:
+        acceptance_source = "structured"
+    elif acceptance_fields:
+        acceptance_source = "partial"
+    else:
+        acceptance_source = "missing"
     has_verification = matches_any(VERIFICATION, message_lower)
     did_work = matches_any(WORK_DONE, message)
     structured_verification_signal = (
@@ -195,8 +209,9 @@ def main() -> int:
                     "decision": "block",
                     "reason": (
                         "Structured acceptance footer indicates subagent_status is not closed/retained. "
-                        "Before finalizing, state the lifecycle outcome: 'Subagents: closed' "
-                        "or 'Subagents: retained because ...'."
+                        "Before finalizing, include a complete acceptance footer with verification_status, "
+                        "review_status, subagent_status, and risk_status, and state the lifecycle outcome: "
+                        "'Subagents: closed' or 'Subagents: retained because ...'."
                     ),
                 }))
                 return 0
@@ -219,8 +234,56 @@ def main() -> int:
         print(json.dumps({
             "decision": "block",
             "reason": (
-                "Subagent usage was detected. Before finalizing, state the lifecycle outcome: "
-                "'Subagents: closed' or 'Subagents: retained because ...'."
+                "Subagent usage was detected. Before finalizing, add a complete acceptance footer "
+                "(verification_status, review_status, subagent_status, risk_status) and state the lifecycle "
+                "outcome: 'Subagents: closed' or 'Subagents: retained because ...'."
+            ),
+        }))
+        return 0
+
+    if did_work and acceptance_source == "partial":
+        emit_observability_event(
+            payload,
+            event_name="stop",
+            status="blocked",
+            reason="acceptance_footer_incomplete",
+            acceptance_source=acceptance_source,
+            acceptance=base_acceptance(acceptance_source),
+            extra={
+                **acceptance_fields,
+                "missing_fields": footer_missing,
+            },
+        )
+        print(json.dumps({
+            "decision": "block",
+            "reason": (
+                "Acceptance footer is incomplete. Add these fields before finalizing: "
+                + ", ".join(footer_missing)
+                + "."
+            ),
+        }))
+        return 0
+
+    if did_work and acceptance_source == "missing":
+        emit_observability_event(
+            payload,
+            event_name="stop",
+            status="blocked",
+            reason="acceptance_footer_missing",
+            acceptance_source="missing",
+            acceptance=base_acceptance("missing"),
+            extra={
+                "has_work_done_signal": True,
+                "has_verification_signal": has_verification,
+                "has_subagent_signal": used_subagents,
+            },
+        )
+        print(json.dumps({
+            "decision": "block",
+            "reason": (
+                "Work completion was detected without the required acceptance footer. "
+                "Before finalizing, add verification_status, review_status, subagent_status, "
+                "and risk_status, plus short notes for tests/checks run or why not run."
             ),
         }))
         return 0
@@ -317,28 +380,6 @@ def main() -> int:
             extra={**acceptance_fields},
         )
         print(json.dumps({"continue": True}))
-        return 0
-
-    if did_work and not has_verification:
-        emit_observability_event(
-            payload,
-            event_name="stop",
-            status="blocked",
-            reason="acceptance_missing",
-            acceptance_source="heuristic",
-            acceptance=base_acceptance("heuristic"),
-            extra={
-                "has_work_done_signal": True,
-                "has_verification_signal": False,
-            },
-        )
-        print(json.dumps({
-            "decision": "block",
-            "reason": (
-                "Before finalizing, add a concise acceptance note: tests/checks run or why not run, "
-                "review/critique status for heavy work or why omitted, and any residual risk."
-            ),
-        }))
         return 0
 
     emit_observability_event(

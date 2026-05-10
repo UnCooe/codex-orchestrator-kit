@@ -8,8 +8,8 @@ enabled_reviewers = [
   "subagent-workflow",
 ]
 
-# External reviewer packs, such as "turnstate", must be installed and enabled
-# explicitly by the monitored project.
+# External reviewer packs must be installed and enabled explicitly by the
+# monitored project.
 
 # How aggressively recurring automation should surface findings.
 # Valid v1 values: "quiet", "normal", "strict".

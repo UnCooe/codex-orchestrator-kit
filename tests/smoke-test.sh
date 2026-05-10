@@ -24,8 +24,8 @@ PYTHON_REAL=$(command -v "$PYTHON_BIN")
 
 test -f "$AGENTS_HOME/skills/orchestrator/SKILL.md"
 test -f "$AGENTS_HOME/skills/orchestrator-observability/SKILL.md"
-if [[ -e "$AGENTS_HOME/skills/turnstate-observability/SKILL.md" ]]; then
-  echo "Default install should not install turnstate-observability" >&2
+if [[ -e "$AGENTS_HOME/skills/project-specific-observability/SKILL.md" ]]; then
+  echo "Default install should not install project-specific reviewer packs" >&2
   exit 1
 fi
 test -f "$CODEX_HOME/hooks/orchestrator_user_prompt.py"
@@ -52,9 +52,28 @@ else
   exit 1
 fi
 
-"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" --with-turnstate >/dev/null
-test -f "$AGENTS_HOME/skills/turnstate-observability/SKILL.md"
-test -f "$AGENTS_HOME/skills/turnstate-observability/scripts/turnstate_report.py"
+DEMO_PACK="$TMP_ROOT/demo-reviewer-pack"
+mkdir -p "$DEMO_PACK/skills/demo-observability/scripts"
+cat > "$DEMO_PACK/skills/demo-observability/SKILL.md" <<'EOF'
+---
+name: demo-observability
+description: Smoke test external reviewer pack.
+---
+
+# Demo Observability
+EOF
+printf '%s\n' 'print("demo")' > "$DEMO_PACK/skills/demo-observability/scripts/demo.py"
+"$ROOT/install-reviewer-pack.sh" --pack "$DEMO_PACK" --agents-home "$AGENTS_HOME" >/dev/null
+test -f "$AGENTS_HOME/skills/demo-observability/SKILL.md"
+test -f "$AGENTS_HOME/skills/demo-observability/scripts/demo.py"
+
+REGISTERED_PROJECT="$TMP_ROOT/registered-project"
+mkdir -p "$REGISTERED_PROJECT"
+"$ROOT/register-project.sh" --project "$REGISTERED_PROJECT" --project-id smoke-project --reviewers subagent-workflow,demo-reviewer >/dev/null
+test -f "$REGISTERED_PROJECT/.codex/project-context.md"
+grep -q 'project_id = "smoke-project"' "$REGISTERED_PROJECT/.codex/review-profile.toml"
+grep -q '"subagent-workflow"' "$REGISTERED_PROJECT/.codex/review-profile.toml"
+grep -q '"demo-reviewer"' "$REGISTERED_PROJECT/.codex/review-profile.toml"
 
 grep -q 'C:/legacy/orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json" && {
   echo "Legacy orchestrator_user_prompt entry should not be preserved" >&2
@@ -140,6 +159,19 @@ if obj.get("continue") is not True:
     raise SystemExit("Structured acceptance stop payload did not pass")
 PY
 
+PARTIAL_STOP=$(cat <<'JSON' | "$PYTHON_BIN" "$STOP_HOOK"
+{"last_assistant_message":"implemented hook behavior.\nverification_status=pass\nreview_status=pass"}
+JSON
+)
+"$PYTHON_BIN" - "$PARTIAL_STOP" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+if obj.get("decision") != "block" or "Acceptance footer is incomplete" not in obj.get("reason", ""):
+    raise SystemExit("Partial acceptance footer should be blocked")
+PY
+
 SPACE_PY_DIR="$TMP_ROOT/python with space"
 mkdir -p "$SPACE_PY_DIR"
 SPACE_PY="$SPACE_PY_DIR/python3"
@@ -188,6 +220,7 @@ cat > "$SESSIONS_ROOT/2026/05/03/rollout-project-context-session.jsonl" <<JSONL
 JSONL
 
 "$PYTHON_BIN" "$ROOT/tests/test_session_facts_since_days.py"
+"$PYTHON_BIN" "$ROOT/tests/test_acceptance_footer_and_triage.py"
 
 "$PYTHON_BIN" "$AGENTS_HOME/skills/orchestrator-observability/scripts/analyze.py" \
   --codex-home "$CODEX_HOME" \
@@ -229,6 +262,10 @@ if not any(f.get("event_type") == "orchestrator_pre_tool_use" and f.get("tool_na
     raise SystemExit("Analyzer did not preserve orchestrator event tool_name")
 if obj.get("structured_acceptance", {}).get("structured_acceptance_verified", 0) < 1:
     raise SystemExit("Analyzer structured acceptance counters did not count verified footer")
+if obj.get("acceptance", {}).get("work_done_missing_acceptance_footer", 0) < 1:
+    raise SystemExit("Analyzer did not count missing acceptance footers")
+if not obj.get("trend", {}).get("overall"):
+    raise SystemExit("Analyzer trend summary missing")
 if not obj.get("suggestions"):
     raise SystemExit("Analyzer suggestions missing")
 if not any("verification" in item.lower() for item in obj["suggestions"]):
@@ -266,42 +303,6 @@ if sys.argv[2] in report_text or "supersecret" in report_text or "sk-1234567890a
     raise SystemExit("Subagent workflow report leaked project context path or secret")
 PY
 
-"$PYTHON_BIN" "$AGENTS_HOME/skills/turnstate-observability/scripts/turnstate_report.py" \
-  --codex-home "$CODEX_HOME" \
-  --since-days 30 \
-  --report-id smoke > /tmp/turnstate-observability-smoke-report.json
-
-TURNSTATE_REPORT="$CODEX_HOME/turnstate-observability/reports/turnstate-compliance-smoke.json"
-test -f "$TURNSTATE_REPORT"
-"$PYTHON_BIN" - "$TURNSTATE_REPORT" "$PROJECT_CONTEXT_DIR" "$PROJECT_CONTEXT_NAME" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    obj = json.load(stream)
-if obj["rule_profile"] != "turnstate-default-v1":
-    raise SystemExit("Turnstate report used an unexpected rule profile")
-if obj["sessions_seen"] < 1:
-    raise SystemExit("Turnstate report did not see fixture sessions")
-if "score" not in obj:
-    raise SystemExit("Turnstate report missing score")
-if "final_acceptance_present" not in obj.get("rule_failures", {}):
-    raise SystemExit("Turnstate report did not classify missing final acceptance verification")
-if not obj.get("suggestions"):
-    raise SystemExit("Turnstate report suggestions missing")
-context_key = f"project:{sys.argv[3]}"
-context = obj.get("project_context", {}).get(context_key)
-if not context or not context.get("available"):
-    raise SystemExit("Turnstate report did not include available project context")
-if "supersecret" in context.get("summary", "") or "sk-1234567890abcdefghijklmnopqrstuvwxyz" in context.get("summary", "") or "[redacted]" not in context.get("summary", ""):
-    raise SystemExit("Turnstate project context summary was not redacted")
-report_text = json.dumps(obj, ensure_ascii=False)
-if "please implement" in report_text:
-    raise SystemExit("Turnstate report leaked assistant content")
-if any(path in report_text for path in ("C:/repo", "D:/repo", "/tmp/repo", sys.argv[1].split("/turnstate-observability/")[0], sys.argv[2], "sk-1234567890abcdefghijklmnopqrstuvwxyz")):
-    raise SystemExit("Turnstate report leaked full local paths without --include-paths")
-PY
-
 TRIAGE="$AGENTS_HOME/skills/orchestrator-observability/scripts/triage.py"
 USER_PROMPT="$CODEX_HOME/hooks/orchestrator_user_prompt.py"
 
@@ -317,7 +318,21 @@ cat > "$HIGH_REPORT" <<'JSON'
   },
   "acceptance": {
     "work_done_missing_verification": 0,
-    "work_done_missing_subagent_status": 0
+    "work_done_missing_subagent_status": 0,
+    "work_done_missing_acceptance_footer": 2,
+    "acceptance_footer_partial": 1
+  },
+  "trend": {
+    "overall": "worsening",
+    "signals": [
+      {
+        "metric": "work_done_missing_acceptance_footer",
+        "status": "worsened",
+        "current": 2,
+        "previous": 0,
+        "delta": 2
+      }
+    ]
   },
   "suggestions": ["High blocked hook ratio needs review."]
 }
@@ -373,8 +388,15 @@ cat > "$LOW_REPORT" <<'JSON'
   },
   "acceptance": {
     "work_done_missing_verification": 0,
-    "work_done_missing_subagent_status": 0
+    "work_done_missing_subagent_status": 0,
+    "work_done_missing_acceptance_footer": 0,
+    "acceptance_footer_partial": 0
   },
+  "trend": {
+    "overall": "stable",
+    "signals": []
+  },
+  "project_context_available": true,
   "suggestions": ["Update guidance wording."]
 }
 JSON
@@ -462,7 +484,13 @@ cat > "$BENIGN_AUTOMATION_REPORT" <<'JSON'
   },
   "acceptance": {
     "work_done_missing_verification": 0,
-    "work_done_missing_subagent_status": 0
+    "work_done_missing_subagent_status": 0,
+    "work_done_missing_acceptance_footer": 0,
+    "acceptance_footer_partial": 0
+  },
+  "trend": {
+    "overall": "stable",
+    "signals": []
   },
   "suggestions": ["Automation looks stable; reduce error message verbosity in summaries."]
 }
@@ -475,6 +503,56 @@ import sys
 obj = json.loads(sys.argv[1])
 if obj["severity"] != "none":
     raise SystemExit(f"Benign automation wording should not trigger high risk: {obj}")
+PY
+
+RECOVERING_REPORT="$REPORT_DIR/orchestrator-observability-recovering-smoke.json"
+cat > "$RECOVERING_REPORT" <<'JSON'
+{
+  "totals": {
+    "orchestrator_events": 8,
+    "blocked_orchestrator_events": 2
+  },
+  "subagents": {
+    "lifecycle_delta_spawn_minus_close": 0
+  },
+  "acceptance": {
+    "work_done_missing_verification": 0,
+    "work_done_missing_subagent_status": 0,
+    "work_done_missing_acceptance_footer": 1,
+    "acceptance_footer_partial": 0
+  },
+  "trend": {
+    "overall": "improving",
+    "signals": [
+      {
+        "metric": "work_done_missing_acceptance_footer",
+        "status": "improved",
+        "current": 1,
+        "previous": 3,
+        "delta": -2
+      }
+    ]
+  },
+  "project_context_available": true,
+  "suggestions": ["Tighten footer reminders."]
+}
+JSON
+cat > "$REPORT_DIR/orchestrator-observability-recovering-smoke.patch.diff" <<'DIFF'
+diff --git a/docs/proposal-guidance.md b/docs/proposal-guidance.md
+--- a/docs/proposal-guidance.md
++++ b/docs/proposal-guidance.md
+@@ -1 +1,2 @@
+ proposal guidance
++footer reminder follow-up
+DIFF
+RECOVERING_TRIAGE=$("$PYTHON_BIN" "$TRIAGE" --codex-home "$CODEX_HOME" --since-days 3 --report "$RECOVERING_REPORT")
+"$PYTHON_BIN" - "$RECOVERING_TRIAGE" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+if obj["severity"] != "low" or obj["summary"].get("classification") != "improved":
+    raise SystemExit(f"Recovering trend should downgrade to low proposal: {obj}")
 PY
 
 APPLY_PATCH_REPORT="$REPORT_DIR/orchestrator-observability-applypatch-smoke.json"

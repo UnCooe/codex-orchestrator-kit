@@ -190,6 +190,23 @@ def _actionable_suggestions(report: Dict) -> List[str]:
     ]
 
 
+def _trend_overall(report: Dict) -> str:
+    trend = report.get("trend", {})
+    if isinstance(trend, dict):
+        return str(trend.get("overall") or "")
+    return ""
+
+
+def _trend_signal_status(report: Dict, metric: str) -> str:
+    trend = report.get("trend", {})
+    if not isinstance(trend, dict):
+        return ""
+    for item in trend.get("signals", []) or []:
+        if isinstance(item, dict) and item.get("metric") == metric:
+            return str(item.get("status") or "")
+    return ""
+
+
 def classify(report: Dict) -> Tuple[str, List[str], Dict[str, object]]:
     totals = report.get("totals", {}) if isinstance(report.get("totals", {}), dict) else {}
     subagents = report.get("subagents", {}) if isinstance(report.get("subagents", {}), dict) else {}
@@ -200,12 +217,32 @@ def classify(report: Dict) -> Tuple[str, List[str], Dict[str, object]]:
     lifecycle_delta = _to_int(subagents.get("lifecycle_delta_spawn_minus_close", 0))
     missing_verification = _to_int(acceptance.get("work_done_missing_verification", 0))
     missing_subagent_status = _to_int(acceptance.get("work_done_missing_subagent_status", 0))
+    missing_footer = _to_int(acceptance.get("work_done_missing_acceptance_footer", 0))
+    partial_footer = _to_int(acceptance.get("acceptance_footer_partial", 0))
 
     privacy_leak, privacy_hits = _scan_for_privacy_leak(report)
     automation_failure = _contains_automation_failure_marker(report)
     high_block_ratio = orchestrator_events >= 4 and blocked_ratio >= 0.3
-    repeat_acceptance_blocks = (missing_verification + missing_subagent_status) >= 3 or lifecycle_delta >= 3
+    repeat_acceptance_blocks = (missing_verification + missing_subagent_status + missing_footer + partial_footer) >= 3 or lifecycle_delta >= 3
     high_close_delta = lifecycle_delta >= 4
+    severe_signal = high_block_ratio or repeat_acceptance_blocks or high_close_delta
+    trend_overall = _trend_overall(report) or "unknown"
+    blocked_ratio_trend = _trend_signal_status(report, "blocked_ratio_x10000")
+    acceptance_trend = _trend_signal_status(report, "work_done_missing_acceptance_footer")
+    lifecycle_trend = _trend_signal_status(report, "lifecycle_delta_spawn_minus_close")
+    project_context_available = bool(report.get("project_context_available"))
+    actionable = _actionable_suggestions(report)
+    classification = "repeated"
+    if trend_overall == "first_run":
+        classification = "new"
+    elif trend_overall == "worsening":
+        classification = "worse"
+    elif trend_overall == "improving":
+        classification = "improved"
+    elif not project_context_available and not severe_signal and not actionable:
+        classification = "setup_debt"
+    elif severe_signal:
+        classification = "repeated"
 
     flags = {
         "orchestrator_events": orchestrator_events,
@@ -214,20 +251,47 @@ def classify(report: Dict) -> Tuple[str, List[str], Dict[str, object]]:
         "lifecycle_delta_spawn_minus_close": lifecycle_delta,
         "work_done_missing_verification": missing_verification,
         "work_done_missing_subagent_status": missing_subagent_status,
+        "work_done_missing_acceptance_footer": missing_footer,
+        "acceptance_footer_partial": partial_footer,
         "privacy_hit_count": privacy_hits,
         "automation_failure_marker": automation_failure,
         "high_blocked_ratio": high_block_ratio,
         "repeated_acceptance_or_lifecycle_blocks": repeat_acceptance_blocks,
         "high_close_delta": high_close_delta,
+        "trend_overall": trend_overall,
+        "blocked_ratio_trend": blocked_ratio_trend,
+        "acceptance_footer_trend": acceptance_trend,
+        "lifecycle_trend": lifecycle_trend,
+        "project_context_available": project_context_available,
+        "classification": classification,
         "actionable_suggestion_count": len(_actionable_suggestions(report)),
     }
 
-    if privacy_leak or automation_failure or high_block_ratio or repeat_acceptance_blocks or high_close_delta:
+    if privacy_leak or automation_failure:
         return "high", ["high_risk"], flags
 
-    actionable = _actionable_suggestions(report)
+    worsening_or_new = trend_overall in {"first_run", "worsening", "mixed"}
+    if severe_signal and (worsening_or_new or blocked_ratio >= 0.5 or lifecycle_delta >= 4):
+        reasons = ["high_risk"]
+        if high_block_ratio and blocked_ratio_trend in {"first_observation", "worsened"}:
+            reasons.append("blocked_ratio_worsening")
+        if (missing_footer > 0 or partial_footer > 0) and acceptance_trend in {"first_observation", "worsened"}:
+            reasons.append("acceptance_footer_regression")
+        if lifecycle_delta > 0 and lifecycle_trend in {"first_observation", "worsened"}:
+            reasons.append("subagent_lifecycle_regression")
+        return "high", reasons, flags
+
+    if severe_signal and trend_overall == "improving":
+        return "candidate_low", ["recovering_but_open"], flags
+
+    if not project_context_available and not severe_signal and not actionable:
+        return "none", ["setup_debt"], flags
+
     if actionable:
-        return "candidate_low", ["actionable_suggestions_present"], flags
+        reason = "actionable_suggestions_present"
+        if trend_overall == "stable":
+            reason = "stable_background_with_actionable_suggestions"
+        return "candidate_low", [reason], flags
 
     return "none", [], flags
 
@@ -278,7 +342,7 @@ def _high_risk_title(flags: Dict[str, object]) -> str:
     if flags.get("high_blocked_ratio"):
         return "hook 阻断比例偏高，可能存在误伤"
     if flags.get("repeated_acceptance_or_lifecycle_blocks"):
-        return "Stop gate 或 subagent 生命周期异常反复出现"
+        return "Stop gate、acceptance footer 或 subagent 生命周期异常反复出现"
     if flags.get("high_close_delta"):
         return "subagent 关闭数量落后，可能占用槽位"
     return "Orchestrator 观测发现高风险问题"
@@ -295,8 +359,12 @@ def _safe_evidence_lines(flags: Dict[str, object]) -> List[str]:
             "验收/生命周期异常 "
             f"verification={flags.get('work_done_missing_verification')}, "
             f"subagents={flags.get('work_done_missing_subagent_status')}, "
+            f"footer={flags.get('work_done_missing_acceptance_footer')}, "
+            f"partial_footer={flags.get('acceptance_footer_partial')}, "
             f"delta={flags.get('lifecycle_delta_spawn_minus_close')}"
         )
+    if flags.get("trend_overall") not in {"", "unknown"}:
+        lines.append(f"趋势 {flags.get('trend_overall')}")
     if _to_int(flags.get("privacy_hit_count", 0)) > 0:
         lines.append(f"隐私路径命中 {flags.get('privacy_hit_count')} 次")
     if flags.get("automation_failure_marker"):
@@ -332,6 +400,7 @@ def _write_high_alert(triage_root: Path, report_path: Path, reasons: List[str], 
         "reasons": reasons,
         "evidence": _safe_evidence_lines(flags),
         "flags": flags,
+        "classification": str(flags.get("classification") or "unknown"),
         **preserved,
     }
     if not dry_run:
@@ -368,6 +437,7 @@ def _write_proposal(
         "target_files": changed_files,
         "evidence": evidence,
         "reasons": reasons,
+        "classification": str(flags.get("classification") or "unknown"),
         "reply_options": ["应用", "延后", "忽略", "展开依据"],
     }
     proposal_md = "\n".join(
@@ -471,6 +541,7 @@ def main() -> None:
             "evidence_hash": evidence_hash,
             "flags": flags,
             "reasons": reasons,
+            "classification": str(flags.get("classification") or "unknown"),
             "state": "pending" if severity in {"high", "low"} else "archived",
         }
         if severity != "low":
@@ -484,6 +555,7 @@ def main() -> None:
             "flags": flags,
             "report_name": report_path.name,
             "evidence_hash": evidence_hash,
+            "classification": str(flags.get("classification") or "unknown"),
             "dry_run": args.dry_run,
         },
     }

@@ -5,7 +5,6 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CODEX_TARGET="${CODEX_HOME:-}"
 AGENTS_TARGET="${AGENTS_HOME:-}"
 DRY_RUN=0
-INCLUDE_TURNSTATE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,13 +20,9 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       shift
       ;;
-    --with-turnstate)
-      INCLUDE_TURNSTATE=1
-      shift
-      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: install.sh [--codex-home PATH] [--agents-home PATH] [--dry-run] [--with-turnstate]" >&2
+      echo "Usage: install.sh [--codex-home PATH] [--agents-home PATH] [--dry-run]" >&2
       exit 2
       ;;
   esac
@@ -249,9 +244,6 @@ PY
 
 copy_sources "$SCRIPT_DIR/skills/orchestrator" "$AGENTS_TARGET/skills/orchestrator"
 copy_sources "$SCRIPT_DIR/skills/orchestrator-observability" "$AGENTS_TARGET/skills/orchestrator-observability"
-if [[ "$INCLUDE_TURNSTATE" == "1" ]]; then
-  copy_sources "$SCRIPT_DIR/reviewer-packs/turnstate/skills/turnstate-observability" "$AGENTS_TARGET/skills/turnstate-observability"
-fi
 copy_sources "$SCRIPT_DIR/hooks" "$CODEX_TARGET/hooks"
 copy_sources "$SCRIPT_DIR/agents" "$CODEX_TARGET/agents"
 

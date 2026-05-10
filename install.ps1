@@ -1,7 +1,6 @@
 param(
     [string]$CodexHome = $env:CODEX_HOME,
     [string]$AgentsHome = $env:AGENTS_HOME,
-    [switch]$IncludeTurnstate,
     [switch]$DryRun
 )
 
@@ -295,10 +294,6 @@ $targets = @(
     @{ Source = Join-Path $scriptRoot 'hooks'; Destination = Join-Path $CodexHome 'hooks' },
     @{ Source = Join-Path $scriptRoot 'agents'; Destination = Join-Path $CodexHome 'agents' }
 )
-
-if ($IncludeTurnstate) {
-    $targets += @{ Source = Join-Path $scriptRoot 'reviewer-packs\turnstate\skills\turnstate-observability'; Destination = Join-Path $AgentsHome 'skills\turnstate-observability' }
-}
 
 foreach ($target in $targets) {
     Stage-Files -Source $target.Source -Destination $target.Destination -Recurse

@@ -42,9 +42,19 @@ VERIFICATION_PATTERNS = [
     "\u672a\u8fd0\u884c",
 ]
 
+ACCEPTANCE_FIELDS = ("verification_status", "review_status", "subagent_status", "risk_status")
+ACCEPTANCE_FIELD_RE = re.compile(
+    r'(?im)(?:^|[,\n;])\s*"?(?P<field>verification_status|review_status|subagent_status|risk_status)"?\s*[:=]\s*(?P<value>[^,\n;\}\]]+)'
+)
 
 WORK_DONE_RE = [re.compile(pattern, re.IGNORECASE) for pattern in WORK_DONE_PATTERNS]
 VERIFICATION_RE = [re.compile(pattern, re.IGNORECASE) for pattern in VERIFICATION_PATTERNS]
+ACCEPTANCE_STATUS_MAP = {
+    "verification_status": {"pass", "passed", "verified", "done", "completed", "ok", "yes", "true", "1", "validation"},
+    "review_status": {"pass", "passed", "reviewed", "done", "completed", "ok", "yes", "true", "1", "not_required", "n/a", "na"},
+    "subagent_status": {"closed", "retained because", "retained", "not used", "none", "n/a", "na", "not_required"},
+    "risk_status": {"low", "moderate", "medium", "manageable", "acceptable", "none", "ok", "yes", "true", "1", "not significant"},
+}
 FILE_TIMESTAMP_PATTERNS = [
     re.compile(r"\b(?P<ts>\d{4}-\d{2}-\d{2}T\d{6})\b"),
     re.compile(r"\b(?P<ts>\d{4}_\d{2}_\d{2}T\d{6})\b"),
@@ -320,6 +330,15 @@ def _to_bool(value: object) -> bool:
     return False
 
 
+def _acceptance_status_positive(field: str, value: object) -> bool:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    if any(bad in normalized for bad in ("critical", "high", "unacceptable", "open", "unknown", "fail", "blocked")):
+        return False
+    return any(token in normalized for token in ACCEPTANCE_STATUS_MAP.get(field, set()))
+
+
 def extract_source_file(codex_home: Path, path: Path) -> str:
     try:
         return str(path.resolve().relative_to(codex_home.resolve())).replace("\\", "/")
@@ -342,19 +361,38 @@ def _assistant_signal_flags(payload: dict) -> Dict[str, bool]:
             "assistant_work_done": False,
             "assistant_has_verification": False,
             "assistant_has_subagent_status": False,
+            "assistant_has_acceptance_footer": False,
+            "assistant_acceptance_footer_complete": False,
+            "assistant_acceptance_footer_field_count": 0,
         }
 
     content_lower = content.lower()
+    footer = parse_acceptance_footer(content)
     assistant_work_done = any(regex.search(content) for regex in WORK_DONE_RE)
-    assistant_has_verification = any(regex.search(content) for regex in VERIFICATION_RE)
+    assistant_has_verification = any(regex.search(content) for regex in VERIFICATION_RE) or bool(footer.get("verification_status"))
     assistant_has_subagent_status = (
-        "subagents: closed" in content_lower or "subagents: retained because" in content_lower
+        "subagents: closed" in content_lower or "subagents: retained because" in content_lower or bool(footer.get("subagent_status"))
     )
     return {
         "assistant_work_done": assistant_work_done,
         "assistant_has_verification": assistant_has_verification,
         "assistant_has_subagent_status": assistant_has_subagent_status,
+        "assistant_has_acceptance_footer": bool(footer),
+        "assistant_acceptance_footer_complete": len(footer) == len(ACCEPTANCE_FIELDS),
+        "assistant_acceptance_footer_field_count": len(footer),
     }
+
+
+def parse_acceptance_footer(message: str) -> Dict[str, str]:
+    if not message:
+        return {}
+    footer = message[-2200:]
+    values: Dict[str, str] = {}
+    for match in ACCEPTANCE_FIELD_RE.finditer(footer):
+        key = match.group("field")
+        value = match.group("value").strip().strip('\'"`')
+        values[key] = value
+    return values
 
 
 def _parse_token_timestamp(token: str) -> Optional[datetime]:
@@ -449,6 +487,9 @@ class SessionFact:
     assistant_work_done: bool = False
     assistant_has_verification: bool = False
     assistant_has_subagent_status: bool = False
+    assistant_has_acceptance_footer: bool = False
+    assistant_acceptance_footer_complete: bool = False
+    assistant_acceptance_footer_field_count: int = 0
     acceptance_source: str = ""
     verification_status: str = ""
     review_status: str = ""
@@ -457,6 +498,11 @@ class SessionFact:
     acceptance_has_work_done_signal: bool = False
     acceptance_has_verification_signal: bool = False
     acceptance_has_subagent_signal: bool = False
+    acceptance_is_structured_complete: bool = False
+    acceptance_footer_verification_fail: bool = False
+    acceptance_footer_review_fail: bool = False
+    acceptance_footer_subagent_fail: bool = False
+    acceptance_footer_risk_fail: bool = False
 
 
 def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> tuple[List[SessionFact], Dict[str, int]]:
@@ -535,6 +581,9 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
             "assistant_work_done": False,
             "assistant_has_verification": False,
             "assistant_has_subagent_status": False,
+            "assistant_has_acceptance_footer": False,
+            "assistant_acceptance_footer_complete": False,
+            "assistant_acceptance_footer_field_count": 0,
         }
         acceptance = {}
         if isinstance(payload.get("acceptance"), dict):
@@ -567,6 +616,15 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
             or (source_file.stem if is_session_file(codex_home, source_file) else "")
         )
         session_id = str(session_id_value or "")
+        acceptance_source = str(acceptance.get("source") or "")
+        verification_status = str(acceptance.get("verification_status") or "")
+        review_status = str(acceptance.get("review_status") or "")
+        subagent_status = str(acceptance.get("subagent_status") or "")
+        risk_status = str(acceptance.get("risk_status") or "")
+        structured_complete = (
+            acceptance_source == "structured"
+            and all(acceptance.get(field) for field in ACCEPTANCE_FIELDS)
+        )
 
         facts.append(
             SessionFact(
@@ -588,14 +646,22 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
                 assistant_work_done=flags["assistant_work_done"],
                 assistant_has_verification=flags["assistant_has_verification"],
                 assistant_has_subagent_status=flags["assistant_has_subagent_status"],
-                acceptance_source=str(acceptance.get("source") or ""),
-                verification_status=str(acceptance.get("verification_status") or ""),
-                review_status=str(acceptance.get("review_status") or ""),
-                subagent_status=str(acceptance.get("subagent_status") or ""),
-                risk_status=str(acceptance.get("risk_status") or ""),
+                assistant_has_acceptance_footer=flags["assistant_has_acceptance_footer"],
+                assistant_acceptance_footer_complete=flags["assistant_acceptance_footer_complete"],
+                assistant_acceptance_footer_field_count=int(flags["assistant_acceptance_footer_field_count"]),
+                acceptance_source=acceptance_source,
+                verification_status=verification_status,
+                review_status=review_status,
+                subagent_status=subagent_status,
+                risk_status=risk_status,
                 acceptance_has_work_done_signal=_to_bool(acceptance.get("has_work_done_signal")),
                 acceptance_has_verification_signal=_to_bool(acceptance.get("has_verification_signal")),
                 acceptance_has_subagent_signal=_to_bool(acceptance.get("has_subagent_signal")),
+                acceptance_is_structured_complete=structured_complete,
+                acceptance_footer_verification_fail=structured_complete and not _acceptance_status_positive("verification_status", verification_status),
+                acceptance_footer_review_fail=structured_complete and not _acceptance_status_positive("review_status", review_status),
+                acceptance_footer_subagent_fail=structured_complete and not _acceptance_status_positive("subagent_status", subagent_status),
+                acceptance_footer_risk_fail=structured_complete and not _acceptance_status_positive("risk_status", risk_status),
             )
         )
 
@@ -622,6 +688,9 @@ def fact_to_dict(fact: SessionFact) -> Dict[str, object]:
         "assistant_work_done": fact.assistant_work_done,
         "assistant_has_verification": fact.assistant_has_verification,
         "assistant_has_subagent_status": fact.assistant_has_subagent_status,
+        "assistant_has_acceptance_footer": fact.assistant_has_acceptance_footer,
+        "assistant_acceptance_footer_complete": fact.assistant_acceptance_footer_complete,
+        "assistant_acceptance_footer_field_count": fact.assistant_acceptance_footer_field_count,
         "acceptance": {
             "source": fact.acceptance_source,
             "verification_status": fact.verification_status,
@@ -631,6 +700,11 @@ def fact_to_dict(fact: SessionFact) -> Dict[str, object]:
             "has_work_done_signal": fact.acceptance_has_work_done_signal,
             "has_verification_signal": fact.acceptance_has_verification_signal,
             "has_subagent_signal": fact.acceptance_has_subagent_signal,
+            "is_structured_complete": fact.acceptance_is_structured_complete,
+            "footer_verification_fail": fact.acceptance_footer_verification_fail,
+            "footer_review_fail": fact.acceptance_footer_review_fail,
+            "footer_subagent_fail": fact.acceptance_footer_subagent_fail,
+            "footer_risk_fail": fact.acceptance_footer_risk_fail,
         },
         "tool_surface": {
             "normalized_tool_name": fact.normalized_tool_name,

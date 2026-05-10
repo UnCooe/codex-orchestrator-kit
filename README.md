@@ -1,10 +1,47 @@
 # Codex Orchestrator Kit (portable)
 
-This repository contains a portable, open-source friendly drop-in bundle for the Codex Desktop orchestrator workflow.
-Its default install surface is the built-in workflow layer: global orchestrator guidance, subagent roles, hooks, and subagent workflow self-observability.
+This repository is a harness for Codex subagent workflow, not a business-project framework.
+Its job is to keep Agent delegation, execution, acceptance, and closure predictable enough to review, trust, and correct.
 
+The default install surface is the built-in workflow layer: global orchestrator guidance, subagent roles, hooks, and subagent workflow self-observability.
 It also includes a workflow review kit layer: privacy-preserving fact extraction, reports, triage conventions, reviewer rubrics, and optional external reviewer packs.
-The kit is not the monitored project. Project-specific context and reviewer choices belong in the monitored project's `.codex/` directory.
+
+The kit is not the monitored project. Project-specific context, business rules, and reviewer choices belong in the monitored project's `.codex/` directory.
+
+## What This Harness Guarantees
+
+The harness is meant to make subagent-based work stable and reviewable:
+
+- delegation discipline for heavy work
+- explicit subagent lifecycle closure or justified retention
+- final acceptance signals that say what was verified, reviewed, and left risky
+- recurring review that can tell the difference between new regression, repeated noise, and setup debt
+
+## What This Harness Does Not Guarantee
+
+The harness does not prove:
+
+- business correctness
+- application test quality
+- project-specific architecture choices
+- whether a monitored repository shipped the right feature
+
+Those belong to the monitored project and its own reviewers.
+
+## How To Read Failures
+
+When automation reports a problem, read it in this order:
+
+1. Is the delivered result trustworthy for the user?
+2. If not, is the problem in agent execution, or in harness guidance and contracts?
+3. If the harness is at fault, should the fix land in hooks, prompts, rubrics, triage, or project context?
+
+Typical ownership:
+
+- workflow constraint too weak -> hooks / prompts / rubric / triage
+- acceptance footer unclear or inconsistently enforced -> acceptance contract
+- missing project semantics -> `.codex/project-context.md` / `.codex/review-profile.toml`
+- business behavior wrong but workflow evidence is sound -> monitored project, not this kit
 
 ## Workflow review model
 
@@ -16,6 +53,19 @@ See `docs/workflow-review-kit.md` for the full boundary.
 - Automation instance layer: scheduled runs that apply rubrics, read project context, and output visible triage.
 
 Recurring automation should treat timers as triggers only. Severity should come from reviewer rubrics plus project context, not from raw counts alone.
+
+## Product boundary
+
+This repo is the workflow and review infrastructure, not the business/project reviewer itself.
+
+- The built-in layer owns runtime behavior: prompts, hooks, delegation guardrails, and stop-gate acceptance enforcement.
+- The observability layer owns facts, summaries, trend comparison, and triage state.
+- Reviewer rubrics own judgment criteria. They decide what counts as observe/triage/proposal.
+- The monitored project owns local context, enabled reviewers, and any project-specific reviewer pack.
+- Automation owns scheduling and reminder delivery only. It does not define severity by itself.
+
+That accountability chain is intentional: hook metrics are evidence, rubrics are policy, project context is calibration, and triage is the visible decision output.
+This harness is successful when recurring review can explain whether the workflow itself needs reinforcement, not merely that a metric moved.
 
 ## What is included
 
@@ -48,7 +98,8 @@ Recurring automation should treat timers as triggers only. Severity should come 
 - `docs/research-notes.md`
 - `docs/workflow-review-kit.md`
 - `docs/reviewers/*-rubric.md`
-- `reviewer-packs/turnstate/` optional external reviewer pack
+- `install-reviewer-pack.ps1` / `install-reviewer-pack.sh`
+- `register-project.ps1` / `register-project.sh`
 - `install.ps1` / `uninstall.ps1` (Windows-first)
 - `install.sh` (best-effort Unix-like)
 - `tests/fixtures/*` sample inputs for hook behavior validation
@@ -78,22 +129,10 @@ Dry run (no file writes):
 ./install.ps1 -DryRun
 ```
 
-Install the optional Turnstate reviewer pack:
-
-```
-./install.ps1 -IncludeTurnstate
-```
-
 Unix-like:
 
 ```
 ./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents
-```
-
-Unix-like with the optional Turnstate reviewer pack:
-
-```
-./install.sh --with-turnstate --codex-home /path/to/.codex --agents-home /path/to/.agents
 ```
 
 ## Uninstall
@@ -105,11 +144,6 @@ Windows:
 ```
 
 The uninstall removes orchestrator hook/agent/skill files and strips orchestrator hook entries from `hooks.json`.
-It does not remove optional external reviewer packs unless asked:
-
-```
-./uninstall.ps1 -RemoveTurnstate
-```
 
 ## Portability design
 
@@ -171,8 +205,38 @@ Reports are written to:
 The analyzer reads both Codex session JSONL and the separate observability event logs, then reports delegation signals, hook blocks, token/reasoning counts, large-output signals, project context summaries, and acceptance gaps.
 It emits project aggregation, redacted CWD labels, a privacy-preserving facts list (with timestamp/session/event metadata), and a suggestions section for follow-up actions.
 
+The point is not to maximize telemetry. The point is to answer a harness question:
+
+- did the agent use the subagent workflow the way this kit expects?
+- if not, is it a new regression, repeated background noise, or setup debt?
+
 Project-specific context is opt-in. Copy `templates/project-context.md` into a monitored project as `.codex/project-context.md`.
 Copy `templates/review-profile.toml` as `.codex/review-profile.toml` when the project needs reviewer-specific reminder or action policy.
+
+Register a monitored project with default subagent workflow review:
+
+```powershell
+./register-project.ps1 -ProjectPath C:\path\to\project
+```
+
+Register a project with an external reviewer selected by that project:
+
+```powershell
+./register-project.ps1 -ProjectPath C:\path\to\project -Reviewers subagent-workflow,my-project-reviewer
+```
+
+Install an external reviewer pack from a monitored project or another local checkout:
+
+```powershell
+./install-reviewer-pack.ps1 -PackPath C:\path\to\project\.codex\reviewer-packs\my-project
+```
+
+Unix-like equivalents:
+
+```bash
+./register-project.sh --project /path/to/project
+./install-reviewer-pack.sh --pack /path/to/project/.codex/reviewer-packs/my-project
+```
 
 Run the subagent workflow report:
 
@@ -203,38 +267,37 @@ Triage writes local state under `$env:CODEX_HOME\orchestrator-observability\tria
 
 The `UserPromptSubmit` hook checks only the pending high-risk alert and reminds at most once per 24 hours.
 Low-risk proposals are not pushed into the next prompt; they are surfaced only when a concrete safe patch exists.
+The `Stop` hook enforces a compact acceptance footer for work-done replies:
+
+- `verification_status=...`
+- `review_status=...`
+- `subagent_status=...`
+- `risk_status=...`
+
+Reports and triage treat that footer as a first-class signal. Missing or partial footers are tracked separately from plain verification gaps so trend classification can distinguish new regressions from stable background noise.
 
 Hooks merge during install is deduplicated by event and orchestrator script name, so legacy `python .../orchestrator_*.py` entries are removed when newer `py -3` style entries are installed.
 
-## Optional Turnstate Reviewer Pack
+## External Reviewer Packs
 
-Turnstate is an optional external reviewer pack under `reviewer-packs/turnstate/`.
-It is not installed or enabled by default. Install it explicitly when a monitored project chooses `turnstate` in `.codex/review-profile.toml`.
-Turnstate reports reuse the same privacy-preserving session fact layer. They are a separate consumer, not a second hook pipeline.
+External reviewer packs belong to the monitored project or to a separate local checkout. The core kit does not ship project-specific reviewers.
 
-Run the Turnstate compliance report:
+A reviewer pack has this minimal shape:
 
-```powershell
-python $env:AGENTS_HOME\skills\turnstate-observability\scripts\turnstate_report.py `
-  --codex-home $env:CODEX_HOME `
-  --since-days 3
+```text
+my-project/.codex/reviewer-packs/my-project/
+└─ skills/
+   └─ my-project-observability/
+      ├─ SKILL.md
+      └─ scripts/
 ```
 
-Reports are written to:
-
-- `$env:CODEX_HOME\turnstate-observability\reports\turnstate-compliance-<timestamp>.json`
-- `$env:CODEX_HOME\turnstate-observability\reports\turnstate-compliance-<timestamp>.md`
-
-The default rule profile checks observable runtime facts: reasoning-summary presence, tool call/output balance, token-count events, verification signals, and large-output noise. Reports still redact full paths and do not include full prompts, full tool output, or full assistant messages.
-
-Turnstate and subagent checks are intentionally separated:
-
-- Turnstate focuses on main-flow compliance.
-- `subagent_workflow.py` focuses on delegation and subagent lifecycle signals.
+Install it with `install-reviewer-pack`, then enable its reviewer id in the monitored project's `.codex/review-profile.toml`.
 
 Reviewer standards:
 
 - Subagent workflow: `docs/reviewers/subagent-workflow-rubric.md`
-- Turnstate optional pack: `reviewer-packs/turnstate/docs/turnstate-rubric.md`
 
-Automations should read the relevant rubric, then project context, then the report summary. External reviewer packs are project-profile choices, not core kit defaults. Missing context lowers confidence; it is not automatically a high-risk finding.
+Automations should read the relevant rubric, then project context, then the report summary.
+External reviewer packs are project-profile choices, not core kit defaults.
+Missing context lowers confidence; it is not automatically a high-risk finding.

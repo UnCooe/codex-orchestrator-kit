@@ -1,7 +1,6 @@
 ﻿param(
     [string]$CodexHome = $env:CODEX_HOME,
-    [string]$AgentsHome = $env:AGENTS_HOME,
-    [switch]$RemoveTurnstate
+    [string]$AgentsHome = $env:AGENTS_HOME
 )
 
 Set-StrictMode -Version Latest
@@ -94,10 +93,6 @@ $removeTargets = @(
     (Join-Path $CodexHome 'agents\reviewer.toml')
     (Join-Path $CodexHome 'agents\test-designer.toml')
 )
-
-if ($RemoveTurnstate) {
-    $removeTargets += (Join-Path $AgentsHome 'skills\turnstate-observability')
-}
 
 $hooksPath = Join-Path $CodexHome 'hooks.json'
 if (Test-Path $hooksPath) {
