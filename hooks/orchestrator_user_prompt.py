@@ -122,6 +122,11 @@ def _heavy_context() -> str:
         "must include 'Subagents: closed' or 'Subagents: retained because ...'. "
         "When work was done, end with a compact acceptance footer containing "
         "verification_status=..., review_status=..., subagent_status=..., risk_status=.... "
+        "Use this exact shape:\n"
+        "verification_status=pass\n"
+        "review_status=pass\n"
+        "subagent_status=closed\n"
+        "risk_status=low\n"
         "The explicit lifecycle sentence and subagent_status must agree."
     )
 
