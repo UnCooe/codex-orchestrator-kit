@@ -286,6 +286,77 @@ def _append_daily_summary(markdown_lines: List[str], daily: Dict[str, int], sinc
         markdown_lines.append(f"- {date}: {count}")
 
 
+def _safe_ratio(num: int, den: int) -> float:
+    if den <= 0:
+        return 0.0
+    return round(num / den, 4)
+
+
+def _footer_adoption_status(coverage: float) -> str:
+    if coverage >= 0.8:
+        return "healthy"
+    if coverage >= 0.4:
+        return "partial"
+    return "weak"
+
+
+def _build_footer_adoption_summary(acceptance: Dict[str, int], trend: Dict[str, object]) -> Dict[str, object]:
+    work_done = _safe_get_int(acceptance, "work_done_messages")
+    complete = _safe_get_int(acceptance, "acceptance_footer_complete")
+    partial = _safe_get_int(acceptance, "acceptance_footer_partial")
+    missing = _safe_get_int(acceptance, "work_done_missing_acceptance_footer")
+    coverage = _safe_ratio(complete, work_done)
+    partial_rate = _safe_ratio(partial, work_done)
+    missing_rate = _safe_ratio(missing, work_done)
+    trend_signals = trend.get("signals", []) if isinstance(trend, dict) else []
+    footer_signal = next(
+        (item for item in trend_signals if isinstance(item, dict) and item.get("metric") == "work_done_missing_acceptance_footer"),
+        {},
+    )
+    summary = (
+        f"footer_adoption={complete}/{work_done} ({coverage}); "
+        f"partial={partial} ({partial_rate}); missing={missing} ({missing_rate})"
+    )
+    return {
+        "work_done_messages": work_done,
+        "complete": complete,
+        "partial": partial,
+        "missing": missing,
+        "coverage_rate": coverage,
+        "partial_rate": partial_rate,
+        "missing_rate": missing_rate,
+        "status": _footer_adoption_status(coverage),
+        "trend_status": str(footer_signal.get("status") or "unknown"),
+        "summary": summary,
+    }
+
+
+def _build_visible_summary(
+    totals: Dict[str, int],
+    acceptance: Dict[str, int],
+    subagents: Dict[str, int],
+    trend: Dict[str, object],
+    footer_adoption: Dict[str, object],
+) -> Dict[str, str]:
+    blocked = _safe_get_int(totals, "blocked_orchestrator_events")
+    total = _safe_get_int(totals, "orchestrator_events")
+    blocked_ratio = _safe_ratio(blocked, total)
+    lifecycle_delta = _safe_get_int(subagents, "lifecycle_delta_spawn_minus_close")
+    first_line = "Orchestrator 自动复盘：triage" if (
+        lifecycle_delta > 0 or footer_adoption.get("missing", 0) > 0 or blocked > 0
+    ) else "Orchestrator 自动复盘：observe"
+    why_it_matters = (
+        f"blocked_ratio={blocked_ratio}; lifecycle_delta={lifecycle_delta}; "
+        f"{footer_adoption.get('summary')}; trend={trend.get('overall', 'unknown')}"
+    )
+    next_action = "tighten workflow closure and footer adoption" if first_line.endswith("triage") else "continue observe"
+    return {
+        "first_line": first_line,
+        "why_it_matters": why_it_matters,
+        "next_action": next_action,
+    }
+
+
 def build_report(
     codex_home: Path,
     since_days: int,
@@ -507,6 +578,14 @@ def build_report(
     }
     previous_report = _load_previous_report(reports_root, report_id)
     data["trend"] = _build_trend_summary(data, previous_report)
+    data["footer_adoption"] = _build_footer_adoption_summary(data["acceptance"], data["trend"])
+    data["visible_summary"] = _build_visible_summary(
+        data["totals"],
+        data["acceptance"],
+        data["subagents"],
+        data["trend"],
+        data["footer_adoption"],
+    )
     data["suggestions"] = _build_suggestions(
         data["totals"],
         data["acceptance"],
@@ -522,6 +601,10 @@ def build_report(
 
     markdown_lines = [
         "# Orchestrator Observability Report",
+        "",
+        f"- Visible summary: {data['visible_summary']['first_line']}",
+        f"- Why it matters: {data['visible_summary']['why_it_matters']}",
+        f"- Next action: {data['visible_summary']['next_action']}",
         "",
         f"- Scope: {codex_home if include_paths else '[redacted]'}",
         f"- Window: last {since_days} day(s)",
@@ -539,6 +622,11 @@ def build_report(
         f"- Large tool outputs: {noise.get('large_tool_outputs', 0)}",
         f"- Acceptance footer complete: {acceptance.get('acceptance_footer_complete', 0)}",
         f"- Acceptance footer missing on work-done replies: {acceptance.get('work_done_missing_acceptance_footer', 0)}",
+        "",
+        "## Footer adoption",
+        f"- summary: {data['footer_adoption']['summary']}",
+        f"- status: {data['footer_adoption']['status']}",
+        f"- trend_status: {data['footer_adoption']['trend_status']}",
         "",
         "## Orchestrator events",
     ]
@@ -627,6 +715,8 @@ def build_report(
         "acceptance": dict(acceptance),
         "noise": dict(noise),
         "trend": data["trend"],
+        "footer_adoption": data["footer_adoption"],
+        "visible_summary": data["visible_summary"],
     }
 
 
