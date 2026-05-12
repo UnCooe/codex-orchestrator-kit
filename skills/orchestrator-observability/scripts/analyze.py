@@ -342,12 +342,14 @@ def _build_visible_summary(
     total = _safe_get_int(totals, "orchestrator_events")
     blocked_ratio = _safe_ratio(blocked, total)
     lifecycle_delta = _safe_get_int(subagents, "lifecycle_delta_spawn_minus_close")
+    footer_status = str(footer_adoption.get("status") or "unknown")
+    trend_overall = str(trend.get("overall") or "unknown")
     first_line = "Orchestrator 自动复盘：triage" if (
         lifecycle_delta > 0 or footer_adoption.get("missing", 0) > 0 or blocked > 0
     ) else "Orchestrator 自动复盘：observe"
     why_it_matters = (
-        f"blocked_ratio={blocked_ratio}; lifecycle_delta={lifecycle_delta}; "
-        f"{footer_adoption.get('summary')}; trend={trend.get('overall', 'unknown')}"
+        f"footer={footer_status} {footer_adoption.get('complete', 0)}/{footer_adoption.get('work_done_messages', 0)}; "
+        f"lifecycle_delta={lifecycle_delta}; blocked_ratio={blocked_ratio}; trend={trend_overall}"
     )
     next_action = "tighten workflow closure and footer adoption" if first_line.endswith("triage") else "continue observe"
     return {

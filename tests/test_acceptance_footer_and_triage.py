@@ -16,6 +16,7 @@ sys.path.insert(0, str(HOOKS))
 
 from analyze import build_report  # noqa: E402
 from session_facts import extract_facts  # noqa: E402
+from subagent_workflow import build_report as build_subagent_workflow_report  # noqa: E402
 from triage import classify  # noqa: E402
 
 
@@ -129,6 +130,63 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
         self.assertEqual(severity, "candidate_low")
         self.assertEqual(reasons, ["recovering_but_open"])
+
+    def test_subagent_workflow_report_exposes_minimal_closure_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "workflow.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {
+                        "timestamp": "2026-05-02T00:00:00Z",
+                        "session_id": "sess-1",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": (
+                                "This is a substantial implementation. I will delegate.\n"
+                                "verification_status=pass\n"
+                                "review_status=pass"
+                            ),
+                        },
+                    },
+                    {
+                        "timestamp": "2026-05-02T00:01:00Z",
+                        "session_id": "sess-1",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "spawn_agent",
+                            "arguments": {"task": "worker"},
+                        },
+                    },
+                    {
+                        "timestamp": "2026-05-02T00:02:00Z",
+                        "session_id": "sess-1",
+                        "source": "orchestrator_user_prompt",
+                        "event": {
+                            "hook_event_name": "UserPromptSubmit",
+                            "status": "warn",
+                        },
+                    },
+                ],
+            )
+
+            output = build_subagent_workflow_report(
+                codex_home,
+                since_days=30,
+                report_id="workflow",
+                reports_dir=str(reports_root),
+                max_samples=5,
+            )
+
+            closure = output["closure_signals"]
+            self.assertEqual(closure["lifecycle_delta"], 1)
+            self.assertEqual(closure["open_sessions"], 1)
+            self.assertEqual(closure["heavy_work_signal_quality"], "no_signal")
+            self.assertEqual(output["visible_summary"]["first_line"], "Subagent 工作流复盘：triage")
 
 
 if __name__ == "__main__":

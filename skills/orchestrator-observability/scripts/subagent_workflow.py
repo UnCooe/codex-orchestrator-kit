@@ -191,6 +191,18 @@ def _heavy_work_interpretation(classification: str, signal_sessions: int, delega
     )
 
 
+def _heavy_work_signal_quality(classification: str, signal_sessions: int, coverage_rate: float) -> str:
+    if classification == "no_signal":
+        return "no_signal"
+    if signal_sessions <= 1:
+        return "thin_sample"
+    if classification == "aligned" and coverage_rate >= 0.8:
+        return "strong"
+    if classification in {"aligned", "partial"} and coverage_rate >= 0.4:
+        return "usable"
+    return "weak"
+
+
 def _build_trend_summary(current_report: Dict[str, object], previous_report: Optional[Dict[str, object]]) -> Dict[str, object]:
     current_subagents = current_report.get("subagents", {}) if isinstance(current_report.get("subagents"), dict) else {}
     current_workflow = current_report.get("workflow_signals", {}) if isinstance(current_report.get("workflow_signals"), dict) else {}
@@ -285,6 +297,27 @@ def _report_classification(action_policy: str, trend_overall: str, heavy_classif
     if trend_overall == "worsening":
         return "worse"
     return "observe"
+
+
+def _build_visible_summary(
+    action_policy: str,
+    classification: str,
+    closure_signals: Dict[str, object],
+    heavy_work: Dict[str, object],
+) -> Dict[str, str]:
+    first_line = "Subagent 工作流复盘：triage" if action_policy == "triage" else "Subagent 工作流复盘：observe"
+    why_it_matters = (
+        f"lifecycle_delta={closure_signals.get('lifecycle_delta', 0)}; "
+        f"open_sessions={closure_signals.get('open_sessions', 0)}; "
+        f"footer_missing={closure_signals.get('work_done_missing_acceptance_footer', 0)}; "
+        f"heavy_quality={heavy_work.get('signal_quality', 'unknown')}; class={classification}"
+    )
+    next_action = "close subagent loops and raise footer adoption" if action_policy == "triage" else "continue observe"
+    return {
+        "first_line": first_line,
+        "why_it_matters": why_it_matters,
+        "next_action": next_action,
+    }
 
 
 def build_report(
@@ -431,6 +464,9 @@ def build_report(
     heavy_signal_classification = _classify_heavy_work_signal(
         heavy_work_delegation_signals, heavy_signal_sessions, heavy_signal_sessions_with_spawn
     )
+    heavy_signal_quality = _heavy_work_signal_quality(
+        heavy_signal_classification, heavy_signal_sessions, heavy_signal_session_coverage
+    )
     heavy_signal_interpretation = _heavy_work_interpretation(
         heavy_signal_classification, heavy_signal_sessions, heavy_signal_sessions_with_spawn
     )
@@ -496,6 +532,7 @@ def build_report(
                 "signal_sessions_with_spawn": heavy_signal_sessions_with_spawn,
                 "signal_sessions_without_spawn": heavy_signal_sessions_without_spawn,
                 "session_coverage_rate": heavy_signal_session_coverage,
+                "signal_quality": heavy_signal_quality,
                 "avg_spawns_per_signal_session": avg_spawns_per_signal_session,
                 "avg_spawns_per_delegated_signal_session": avg_spawns_per_delegated_signal_session,
                 "spawn_count_in_signal_sessions": heavy_signal_session_spawns,
@@ -504,6 +541,10 @@ def build_report(
             },
         },
         "closure_signals": {
+            "lifecycle_delta": unclosed_delta,
+            "open_sessions": open_session_count,
+            "broad_scan_bypasses": broad_scan_bypasses,
+            "heavy_work_signal_quality": heavy_signal_quality,
             "work_done_messages": int(closure.get("work_done_messages", 0)),
             "acceptance_footer_present": int(closure.get("acceptance_footer_present", 0)),
             "acceptance_footer_complete": int(closure.get("acceptance_footer_complete", 0)),
@@ -523,6 +564,12 @@ def build_report(
         str(data["trend"].get("overall") or "unknown"),
         heavy_signal_classification,
     )
+    data["visible_summary"] = _build_visible_summary(
+        action_policy,
+        str(data["classification"]),
+        data["closure_signals"],
+        data["workflow_signals"]["heavy_work_delegation"],
+    )
 
     json_path = reports_root / f"subagent-workflow-{report_id}.json"
     with json_path.open("w", encoding="utf-8") as stream:
@@ -535,6 +582,9 @@ def build_report(
         "- Standard: `default-v1`",
         f"- Action policy: `{action_policy}`",
         f"- Classification: `{data['classification']}`",
+        f"- Visible summary: {data['visible_summary']['first_line']}",
+        f"- Why it matters: {data['visible_summary']['why_it_matters']}",
+        f"- Next action: {data['visible_summary']['next_action']}",
         f"- Project context available: {str(project_context_available).lower()}",
         f"- Scope: {codex_home if include_paths else '[redacted]'}",
         f"- Window: last {since_days} day(s)",
@@ -616,6 +666,7 @@ def build_report(
         "closure_signals": data["closure_signals"],
         "trend": data["trend"],
         "classification": data["classification"],
+        "visible_summary": data["visible_summary"],
     }
 
 
