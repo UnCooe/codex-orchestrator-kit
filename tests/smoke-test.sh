@@ -31,6 +31,36 @@ fi
 test -f "$CODEX_HOME/hooks/orchestrator_user_prompt.py"
 test -f "$CODEX_HOME/agents/critic.toml"
 
+CONFIG_CODEX="$TMP_ROOT/config-codex"
+mkdir -p "$CONFIG_CODEX/skills"
+cat > "$CONFIG_CODEX/config.toml" <<'EOF'
+approval_policy = 'never'
+
+[features]
+codex_hooks = true
+EOF
+"$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex >/dev/null
+test -f "$CONFIG_CODEX/skills/orchestrator/SKILL.md"
+test -f "$CONFIG_CODEX/skills/orchestrator-observability/SKILL.md"
+test -f "$CONFIG_CODEX/hooks/orchestrator_user_prompt.py"
+"$PYTHON_BIN" - "$CONFIG_CODEX/config.toml" <<'PY'
+import tomllib
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    obj = tomllib.load(stream)
+hooks = obj.get("hooks", {})
+for required in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+    if required not in hooks:
+        raise SystemExit(f"config.toml mode missing hook: {required}")
+PY
+"$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex >/dev/null
+COUNT=$(grep -c 'BEGIN codex-orchestrator-kit managed hooks' "$CONFIG_CODEX/config.toml" | tr -d ' ')
+if [[ "$COUNT" != "1" ]]; then
+  echo "config.toml install is not idempotent: managed block appears $COUNT times" >&2
+  exit 1
+fi
+
 if "$PYTHON_BIN" - "$ROOT/templates/review-profile.toml" <<'PY'
 import pathlib
 import re
@@ -66,6 +96,9 @@ printf '%s\n' 'print("demo")' > "$DEMO_PACK/skills/demo-observability/scripts/de
 "$ROOT/install-reviewer-pack.sh" --pack "$DEMO_PACK" --agents-home "$AGENTS_HOME" >/dev/null
 test -f "$AGENTS_HOME/skills/demo-observability/SKILL.md"
 test -f "$AGENTS_HOME/skills/demo-observability/scripts/demo.py"
+"$ROOT/install-reviewer-pack.sh" --pack "$DEMO_PACK" --codex-home "$CONFIG_CODEX" --skills-mode codex >/dev/null
+test -f "$CONFIG_CODEX/skills/demo-observability/SKILL.md"
+test -f "$CONFIG_CODEX/skills/demo-observability/scripts/demo.py"
 
 REGISTERED_PROJECT="$TMP_ROOT/registered-project"
 mkdir -p "$REGISTERED_PROJECT"

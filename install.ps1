@@ -1,6 +1,8 @@
 param(
     [string]$CodexHome = $env:CODEX_HOME,
     [string]$AgentsHome = $env:AGENTS_HOME,
+    [ValidateSet('auto', 'hooks_json', 'config_toml')] [string]$HookMode = 'auto',
+    [ValidateSet('auto', 'agents', 'codex')] [string]$SkillsMode = 'auto',
     [switch]$DryRun
 )
 
@@ -280,17 +282,82 @@ function Merge-Hooks {
     Write-Host "installed: $OutputPath"
 }
 
+function Resolve-HookMode {
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][string]$CodexHomePath
+    )
+
+    if ($Mode -ne 'auto') { return $Mode }
+    if (Test-Path (Join-Path $CodexHomePath 'hooks.json')) { return 'hooks_json' }
+    if (Test-Path (Join-Path $CodexHomePath 'config.toml')) { return 'config_toml' }
+    return 'hooks_json'
+}
+
+function Resolve-SkillsMode {
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][string]$ResolvedHookMode,
+        [Parameter(Mandatory)][string]$CodexHomePath,
+        [Parameter(Mandatory)][string]$AgentsHomePath
+    )
+
+    if ($Mode -ne 'auto') { return $Mode }
+    if (Test-Path (Join-Path $CodexHomePath 'skills')) { return 'codex' }
+    if ($ResolvedHookMode -eq 'config_toml') { return 'codex' }
+    if (Test-Path (Join-Path $AgentsHomePath 'skills')) { return 'agents' }
+    return 'agents'
+}
+
+function Merge-ConfigTomlHooks {
+    param(
+        [Parameter(Mandatory)][string]$TemplateContent,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [Parameter(Mandatory)][string]$BeginMarker,
+        [Parameter(Mandatory)][string]$EndMarker
+    )
+
+    try {
+        $current = Get-Content -Path $OutputPath -Raw -Encoding utf8
+    } catch {
+        $current = ''
+    }
+
+    $pattern = '(?ms)^[ \t]*' + [regex]::Escape($BeginMarker) + "`r?`n.*?^[ \t]*" + [regex]::Escape($EndMarker) + "`r?`n?"
+    $cleaned = [regex]::Replace($current, $pattern, '').TrimEnd()
+    $managedBlock = $BeginMarker + [Environment]::NewLine + $TemplateContent.TrimEnd() + [Environment]::NewLine + $EndMarker + [Environment]::NewLine
+
+    if ($cleaned) {
+        $newText = $cleaned + [Environment]::NewLine + [Environment]::NewLine + $managedBlock
+    } else {
+        $newText = $managedBlock
+    }
+
+    if ($DryRun) {
+        Write-Host '[DRY-RUN] merged config.toml hooks block:'
+        Write-Output $newText
+        return
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path $OutputPath -Parent) -Force | Out-Null
+    Set-Content -Path $OutputPath -Value $newText -Encoding utf8
+    Write-Host "installed: $OutputPath"
+}
+
 $CodexHome = Get-CodexHome $CodexHome
 $AgentsHome = Get-AgentsHome $AgentsHome
 $PythonCommand = Resolve-PythonCommand
 $HookPythonCommand = ConvertTo-HookPythonCommand $PythonCommand
 $CodexHomeNormalized = ($CodexHome -replace '\\', '/')
+$ResolvedHookMode = Resolve-HookMode -Mode $HookMode -CodexHomePath $CodexHome
+$ResolvedSkillsMode = Resolve-SkillsMode -Mode $SkillsMode -ResolvedHookMode $ResolvedHookMode -CodexHomePath $CodexHome -AgentsHomePath $AgentsHome
+$SkillsRoot = if ($ResolvedSkillsMode -eq 'codex') { $CodexHome } else { $AgentsHome }
 
-Write-Host "input: source=$scriptRoot, codex_home=$CodexHome, agents_home=$AgentsHome"
+Write-Host "input: source=$scriptRoot, codex_home=$CodexHome, agents_home=$AgentsHome, hook_mode=$ResolvedHookMode, skills_mode=$ResolvedSkillsMode"
 
 $targets = @(
-    @{ Source = Join-Path $scriptRoot 'skills\orchestrator'; Destination = Join-Path $AgentsHome 'skills\orchestrator' },
-    @{ Source = Join-Path $scriptRoot 'skills\orchestrator-observability'; Destination = Join-Path $AgentsHome 'skills\orchestrator-observability' },
+    @{ Source = Join-Path $scriptRoot 'skills\orchestrator'; Destination = Join-Path $SkillsRoot 'skills\orchestrator' },
+    @{ Source = Join-Path $scriptRoot 'skills\orchestrator-observability'; Destination = Join-Path $SkillsRoot 'skills\orchestrator-observability' },
     @{ Source = Join-Path $scriptRoot 'hooks'; Destination = Join-Path $CodexHome 'hooks' },
     @{ Source = Join-Path $scriptRoot 'agents'; Destination = Join-Path $CodexHome 'agents' }
 )
@@ -299,14 +366,25 @@ foreach ($target in $targets) {
     Stage-Files -Source $target.Source -Destination $target.Destination -Recurse
 }
 
-$hooksTemplate = Get-Content -Path (Join-Path $scriptRoot 'templates\hooks.json.tpl') -Raw
-$hooksTemplate = $hooksTemplate.Replace('{{CODEX_HOME}}', (ConvertTo-JsonStringContent $CodexHomeNormalized))
-$hooksTemplate = $hooksTemplate.Replace('{{PYTHON_EXE}}', (ConvertTo-JsonStringContent $HookPythonCommand))
-$hooksPath = Join-Path $CodexHome 'hooks.json'
-if ((-not $DryRun) -and (Test-Path $hooksPath)) {
-    Backup-Path -Path $hooksPath
-}
+if ($ResolvedHookMode -eq 'hooks_json') {
+    $hooksTemplate = Get-Content -Path (Join-Path $scriptRoot 'templates\hooks.json.tpl') -Raw
+    $hooksTemplate = $hooksTemplate.Replace('{{CODEX_HOME}}', (ConvertTo-JsonStringContent $CodexHomeNormalized))
+    $hooksTemplate = $hooksTemplate.Replace('{{PYTHON_EXE}}', (ConvertTo-JsonStringContent $HookPythonCommand))
+    $hooksPath = Join-Path $CodexHome 'hooks.json'
+    if ((-not $DryRun) -and (Test-Path $hooksPath)) {
+        Backup-Path -Path $hooksPath
+    }
 
-Merge-Hooks -TemplateContent $hooksTemplate -ExistingPath $hooksPath -OutputPath $hooksPath
+    Merge-Hooks -TemplateContent $hooksTemplate -ExistingPath $hooksPath -OutputPath $hooksPath
+} else {
+    $configTemplate = Get-Content -Path (Join-Path $scriptRoot 'templates\config.toml_hooks.tpl') -Raw
+    $configTemplate = $configTemplate.Replace('{{CODEX_HOME}}', (ConvertTo-JsonStringContent $CodexHomeNormalized))
+    $configTemplate = $configTemplate.Replace('{{PYTHON_EXE}}', (ConvertTo-JsonStringContent $HookPythonCommand))
+    $configPath = Join-Path $CodexHome 'config.toml'
+    if ((-not $DryRun) -and (Test-Path $configPath)) {
+        Backup-Path -Path $configPath
+    }
+    Merge-ConfigTomlHooks -TemplateContent $configTemplate -OutputPath $configPath -BeginMarker '# BEGIN codex-orchestrator-kit managed hooks' -EndMarker '# END codex-orchestrator-kit managed hooks'
+}
 
 Write-Host 'done'

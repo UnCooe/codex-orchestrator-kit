@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory)][string]$PackPath,
     [string]$AgentsHome = $env:AGENTS_HOME,
+    [string]$CodexHome = $env:CODEX_HOME,
+    [ValidateSet('auto', 'agents', 'codex')] [string]$SkillsMode = 'auto',
     [switch]$DryRun
 )
 
@@ -18,6 +20,17 @@ function Get-AgentsHome {
     if ($env:HOME) { return Join-Path $env:HOME '.agents' }
     if ($env:USERPROFILE) { return Join-Path $env:USERPROFILE '.agents' }
     throw 'Cannot determine agents home. Set AGENTS_HOME or HOME/USERPROFILE.'
+}
+
+function Get-CodexHome {
+    param([string]$Value)
+
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        return [System.IO.Path]::GetFullPath($Value)
+    }
+    if ($env:HOME) { return Join-Path $env:HOME '.codex' }
+    if ($env:USERPROFILE) { return Join-Path $env:USERPROFILE '.codex' }
+    throw 'Cannot determine Codex home. Set CODEX_HOME or HOME/USERPROFILE.'
 }
 
 function Backup-Path {
@@ -65,14 +78,25 @@ if (-not (Test-Path $skillsRoot)) {
     throw "Reviewer pack must contain a skills directory: $skillsRoot"
 }
 
+$CodexHome = Get-CodexHome $CodexHome
 $AgentsHome = Get-AgentsHome $AgentsHome
+$ResolvedSkillsMode = if ($SkillsMode -ne 'auto') {
+    $SkillsMode
+} elseif (Test-Path (Join-Path $CodexHome 'skills')) {
+    'codex'
+} elseif (Test-Path (Join-Path $AgentsHome 'skills')) {
+    'agents'
+} else {
+    'agents'
+}
+$SkillsRootHome = if ($ResolvedSkillsMode -eq 'codex') { $CodexHome } else { $AgentsHome }
 $skillDirs = @(Get-ChildItem -Path $skillsRoot -Directory)
 if ($skillDirs.Count -eq 0) {
     throw "Reviewer pack has no skills to install: $skillsRoot"
 }
 
 foreach ($skillDir in $skillDirs) {
-    $destination = Join-Path (Join-Path $AgentsHome 'skills') $skillDir.Name
+    $destination = Join-Path (Join-Path $SkillsRootHome 'skills') $skillDir.Name
     Copy-SkillDirectory -Source $skillDir.FullName -Destination $destination
 }
 

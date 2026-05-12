@@ -1,6 +1,8 @@
 ﻿param(
     [string]$CodexHome = $env:CODEX_HOME,
-    [string]$AgentsHome = $env:AGENTS_HOME
+    [string]$AgentsHome = $env:AGENTS_HOME,
+    [ValidateSet('auto', 'hooks_json', 'config_toml')] [string]$HookMode = 'auto',
+    [ValidateSet('auto', 'agents', 'codex')] [string]$SkillsMode = 'auto'
 )
 
 Set-StrictMode -Version Latest
@@ -66,6 +68,19 @@ function Remove-OrchestratorHooks {
     Set-Content -Path $HooksPath -Value (ConvertTo-Json $obj -Depth 20) -Encoding utf8
 }
 
+function Remove-ConfigTomlManagedHooks {
+    param([string]$ConfigPath)
+
+    if (-not (Test-Path $ConfigPath)) { return }
+
+    $text = Get-Content -Path $ConfigPath -Raw -Encoding utf8
+    $beginMarker = '# BEGIN codex-orchestrator-kit managed hooks'
+    $endMarker = '# END codex-orchestrator-kit managed hooks'
+    $pattern = '(?ms)^[ \t]*' + [regex]::Escape($beginMarker) + "`r?`n.*?^[ \t]*" + [regex]::Escape($endMarker) + "`r?`n?"
+    $updated = [regex]::Replace($text, $pattern, '').TrimEnd()
+    Set-Content -Path $ConfigPath -Value $updated -Encoding utf8
+}
+
 function Backup-Path {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Timestamp)
 
@@ -78,10 +93,29 @@ function Backup-Path {
 $CodexHome = Get-CodexHome $CodexHome
 $AgentsHome = Get-AgentsHome $AgentsHome
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+$ResolvedHookMode = if ($HookMode -ne 'auto') {
+    $HookMode
+} elseif (Test-Path (Join-Path $CodexHome 'hooks.json')) {
+    'hooks_json'
+} elseif (Test-Path (Join-Path $CodexHome 'config.toml')) {
+    'config_toml'
+} else {
+    'hooks_json'
+}
+$ResolvedSkillsMode = if ($SkillsMode -ne 'auto') {
+    $SkillsMode
+} elseif (Test-Path (Join-Path $CodexHome 'skills')) {
+    'codex'
+} elseif (Test-Path (Join-Path $AgentsHome 'skills')) {
+    'agents'
+} else {
+    'agents'
+}
+$SkillsHome = if ($ResolvedSkillsMode -eq 'codex') { $CodexHome } else { $AgentsHome }
 
 $removeTargets = @(
-    (Join-Path $AgentsHome 'skills\orchestrator')
-    (Join-Path $AgentsHome 'skills\orchestrator-observability')
+    (Join-Path $SkillsHome 'skills\orchestrator')
+    (Join-Path $SkillsHome 'skills\orchestrator-observability')
     (Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_post_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_stop.py')
@@ -94,10 +128,18 @@ $removeTargets = @(
     (Join-Path $CodexHome 'agents\test-designer.toml')
 )
 
-$hooksPath = Join-Path $CodexHome 'hooks.json'
-if (Test-Path $hooksPath) {
-    Backup-Path -Path $hooksPath -Timestamp $timestamp
-    Remove-OrchestratorHooks -HooksPath $hooksPath
+if ($ResolvedHookMode -eq 'hooks_json') {
+    $hooksPath = Join-Path $CodexHome 'hooks.json'
+    if (Test-Path $hooksPath) {
+        Backup-Path -Path $hooksPath -Timestamp $timestamp
+        Remove-OrchestratorHooks -HooksPath $hooksPath
+    }
+} else {
+    $configPath = Join-Path $CodexHome 'config.toml'
+    if (Test-Path $configPath) {
+        Backup-Path -Path $configPath -Timestamp $timestamp
+        Remove-ConfigTomlManagedHooks -ConfigPath $configPath
+    }
 }
 
 foreach ($target in $removeTargets) {

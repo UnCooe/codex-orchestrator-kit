@@ -114,7 +114,13 @@ cd C:\Users\...\codex-orchestrator-kit
 ```
 
 The installer writes Codex hook and agent files into `%CODEX_HOME%` when set, otherwise `%HOME%/.codex`.
-It writes skills into `%AGENTS_HOME%` when set, otherwise `%HOME%/.agents`.
+It supports two runtime surfaces:
+
+- `hooks.json` plus `%HOME%/.agents\skills`
+- `config.toml` plus `%HOME%/.codex\skills`
+
+Auto mode detects the live surface from the target Codex home. If `hooks.json` exists, it updates that. If `config.toml` exists without `hooks.json`, it writes a managed hook block into `config.toml`. Skills default to `%HOME%/.agents\skills`, but switch to `%HOME%/.codex\skills` when the Codex-managed surface is detected.
+
 Set custom homes:
 
 ```
@@ -135,6 +141,13 @@ Unix-like:
 ./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents
 ```
 
+Explicit runtime selection:
+
+```bash
+./install.sh --codex-home /path/to/.codex --hook-mode config_toml --skills-mode codex
+./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents --hook-mode hooks_json --skills-mode agents
+```
+
 ## Uninstall
 
 Windows:
@@ -143,14 +156,14 @@ Windows:
 ./uninstall.ps1
 ```
 
-The uninstall removes orchestrator hook/agent/skill files and strips orchestrator hook entries from `hooks.json`.
+The uninstall removes orchestrator hook/agent/skill files and strips orchestrator hook entries from `hooks.json`. In `config.toml` mode it removes the managed hook block instead.
 
 ## Portability design
 
 - No absolute Windows-user paths are stored in distributed sources.
-- Installed hook commands are generated from `templates/hooks.json.tpl` at install time.
-- Codex hooks/custom agents and global skills use separate homes because Codex Desktop commonly reads hooks from `~/.codex` and global skills from `~/.agents`.
-- Existing `hooks.json` is preserved via backup and merged when possible.
+- Installed hook commands are generated from `templates/hooks.json.tpl` or `templates/config.toml_hooks.tpl` at install time.
+- The harness supports both `hooks.json + ~/.agents/skills` and `config.toml + ~/.codex/skills`.
+- Existing `hooks.json` is preserved via backup and merged when possible. Existing `config.toml` is preserved and updated through a managed block.
 - Each overwritten file is backed up with a timestamped `.bak.*` suffix.
 
 ## Plugin-v2 direction
@@ -231,11 +244,18 @@ Install an external reviewer pack from a monitored project or another local chec
 ./install-reviewer-pack.ps1 -PackPath C:\path\to\project\.codex\reviewer-packs\my-project
 ```
 
+For Codex-managed skills under `~/.codex\skills`, install the pack into the Codex surface:
+
+```powershell
+./install-reviewer-pack.ps1 -PackPath C:\path\to\project\.codex\reviewer-packs\my-project -SkillsMode codex
+```
+
 Unix-like equivalents:
 
 ```bash
 ./register-project.sh --project /path/to/project
 ./install-reviewer-pack.sh --pack /path/to/project/.codex/reviewer-packs/my-project
+./install-reviewer-pack.sh --pack /path/to/project/.codex/reviewer-packs/my-project --skills-mode codex --codex-home /path/to/.codex
 ```
 
 Run the subagent workflow report:
