@@ -323,15 +323,221 @@ function Merge-ConfigTomlHooks {
         $current = ''
     }
 
-    $pattern = '(?ms)^[ \t]*' + [regex]::Escape($BeginMarker) + "`r?`n.*?^[ \t]*" + [regex]::Escape($EndMarker) + "`r?`n?"
-    $cleaned = [regex]::Replace($current, $pattern, '').TrimEnd()
-    $managedBlock = $BeginMarker + [Environment]::NewLine + $TemplateContent.TrimEnd() + [Environment]::NewLine + $EndMarker + [Environment]::NewLine
+    $managedPattern = '(?ms)^[ \t]*' + [regex]::Escape($BeginMarker) + "`r?`n.*?^[ \t]*" + [regex]::Escape($EndMarker) + "`r?`n?"
+    $current = [regex]::Replace($current, $managedPattern, '')
 
-    if ($cleaned) {
-        $newText = $cleaned + [Environment]::NewLine + [Environment]::NewLine + $managedBlock
-    } else {
-        $newText = $managedBlock
+    $eventHeaderRegex = '^\[\[hooks\.([A-Za-z0-9_]+)\]\]$'
+    $orchestratorScriptRegex = 'orchestrator_[^\\/''"]+\.py'
+
+    function Split-HookRegion {
+        param([string]$Text)
+
+        $lines = [regex]::Split($Text, "`r?`n")
+        if ($Text -match "`n$") {
+            $trailingNewline = $true
+        } else {
+            $trailingNewline = $false
+        }
+        $start = -1
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i].Trim() -match $eventHeaderRegex) {
+                $start = $i
+                break
+            }
+        }
+        if ($start -lt 0) {
+            return @{
+                Prefix = $Text.TrimEnd()
+                HookRegion = ''
+                Suffix = ''
+            }
+        }
+        $end = $lines.Length
+        for ($i = $start + 1; $i -lt $lines.Length; $i++) {
+            $trimmed = $lines[$i].Trim()
+            if (-not $trimmed) { continue }
+            if ($trimmed.StartsWith('[') -and -not $trimmed.StartsWith('[[hooks.')) {
+                $end = $i
+                break
+            }
+        }
+        if ($start -gt 0) {
+            $prefix = (($lines[0..($start - 1)] -join [Environment]::NewLine)).TrimEnd()
+        } else {
+            $prefix = ''
+        }
+        $hookRegion = ($lines[$start..($end - 1)] -join [Environment]::NewLine)
+        if ($trailingNewline -and $hookRegion) {
+            $hookRegion += [Environment]::NewLine
+        }
+        if ($end -lt $lines.Length) {
+            $suffix = ($lines[$end..($lines.Length - 1)] -join [Environment]::NewLine).TrimStart("`r", "`n")
+        } else {
+            $suffix = ''
+        }
+        return @{
+            Prefix = $prefix
+            HookRegion = $hookRegion
+            Suffix = $suffix
+        }
     }
+
+    function Parse-EventBlocks {
+        param([string]$Text)
+
+        $lines = [regex]::Split($Text, "`r?`n")
+        $blocks = [System.Collections.Generic.List[object]]::new()
+        $currentEvent = $null
+        $currentLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in $lines) {
+            $trimmed = $line.Trim()
+            if ($trimmed -match $eventHeaderRegex) {
+                if ($null -ne $currentEvent) {
+                    $blocks.Add(@{ Event = $currentEvent; Text = (($currentLines -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine) })
+                }
+                $currentEvent = $Matches[1]
+                $currentLines = [System.Collections.Generic.List[string]]::new()
+                $currentLines.Add($line)
+                continue
+            }
+            if ($null -ne $currentEvent) {
+                $currentLines.Add($line)
+            }
+        }
+        if ($null -ne $currentEvent) {
+            $blocks.Add(@{ Event = $currentEvent; Text = (($currentLines -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine) })
+        }
+        return $blocks
+    }
+
+    function Split-EventBlock {
+        param(
+            [string]$BlockText,
+            [string]$Event
+        )
+
+        $lines = [regex]::Split($BlockText, "`r?`n")
+        $header = [System.Collections.Generic.List[string]]::new()
+        $subblocks = [System.Collections.Generic.List[string]]::new()
+        $currentSubblock = [System.Collections.Generic.List[string]]::new()
+        $insideSubblock = $false
+        $expectedHeader = "[[hooks.$Event.hooks]]"
+        foreach ($line in $lines) {
+            if ($line.Trim() -eq $expectedHeader) {
+                if ($insideSubblock -and $currentSubblock.Count -gt 0) {
+                    $subblocks.Add(($currentSubblock -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine)
+                }
+                $currentSubblock = [System.Collections.Generic.List[string]]::new()
+                $currentSubblock.Add($line)
+                $insideSubblock = $true
+                continue
+            }
+            if ($insideSubblock) {
+                $currentSubblock.Add($line)
+            } else {
+                $header.Add($line)
+            }
+        }
+        if ($insideSubblock -and $currentSubblock.Count -gt 0) {
+            $subblocks.Add(($currentSubblock -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine)
+        }
+        return @{
+            Header = (($header -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine)
+            Subblocks = $subblocks
+        }
+    }
+
+    function Normalize-EventBlock {
+        param(
+            [string]$BlockText,
+            [string]$Event
+        )
+
+        $parts = Split-EventBlock -BlockText $BlockText -Event $Event
+        $kept = [System.Collections.Generic.List[string]]::new()
+        foreach ($subblock in $parts.Subblocks) {
+            if ($subblock -notmatch $orchestratorScriptRegex) {
+                $kept.Add($subblock)
+            }
+        }
+        if ($kept.Count -eq 0) {
+            return $null
+        }
+        $result = $parts.Header.TrimEnd() + [Environment]::NewLine
+        foreach ($subblock in $kept) {
+            $result += [Environment]::NewLine + $subblock.TrimEnd() + [Environment]::NewLine
+        }
+        return $result.TrimEnd() + [Environment]::NewLine
+    }
+
+    function Append-ManagedHook {
+        param(
+            [string]$ExistingBlock,
+            [string]$ManagedBlock,
+            [string]$Event
+        )
+
+        $existingParts = Split-EventBlock -BlockText $ExistingBlock -Event $Event
+        $managedParts = Split-EventBlock -BlockText $ManagedBlock -Event $Event
+        $existingSubblocks = [System.Collections.Generic.List[string]]::new()
+        foreach ($subblock in $existingParts.Subblocks) { $existingSubblocks.Add($subblock) }
+
+        if ($existingSubblocks.Count -eq 0) {
+            $baseHeader = if ($managedParts.Header.Trim()) { $managedParts.Header } else { $existingParts.Header }
+        } else {
+            $baseHeader = $existingParts.Header
+        }
+
+        $existingJoined = $existingSubblocks -join [Environment]::NewLine
+        foreach ($subblock in $managedParts.Subblocks) {
+            if (($subblock -match $orchestratorScriptRegex) -and ($existingJoined -match $orchestratorScriptRegex)) {
+                continue
+            }
+            $existingSubblocks.Add($subblock)
+            $existingJoined += [Environment]::NewLine + $subblock
+        }
+
+        $result = $baseHeader.TrimEnd() + [Environment]::NewLine
+        foreach ($subblock in $existingSubblocks) {
+            $result += [Environment]::NewLine + $subblock.TrimEnd() + [Environment]::NewLine
+        }
+        return $result.TrimEnd() + [Environment]::NewLine
+    }
+
+    $regions = Split-HookRegion -Text $current
+    $existingBlocks = Parse-EventBlocks -Text $regions.HookRegion
+    $managedBlocks = Parse-EventBlocks -Text $TemplateContent
+    $orderedEvents = [System.Collections.Generic.List[string]]::new()
+    $mergedBlocks = @{}
+
+    foreach ($block in $existingBlocks) {
+        $normalized = Normalize-EventBlock -BlockText $block.Text -Event $block.Event
+        if ($null -eq $normalized) { continue }
+        if (-not $orderedEvents.Contains($block.Event)) {
+            $orderedEvents.Add($block.Event)
+            $mergedBlocks[$block.Event] = $normalized
+        } else {
+            $mergedBlocks[$block.Event] = Append-ManagedHook -ExistingBlock $mergedBlocks[$block.Event] -ManagedBlock $normalized -Event $block.Event
+        }
+    }
+
+    foreach ($block in $managedBlocks) {
+        if (-not $orderedEvents.Contains($block.Event)) {
+            $orderedEvents.Add($block.Event)
+            $mergedBlocks[$block.Event] = $block.Text.TrimEnd() + [Environment]::NewLine
+        } else {
+            $mergedBlocks[$block.Event] = Append-ManagedHook -ExistingBlock $mergedBlocks[$block.Event] -ManagedBlock $block.Text -Event $block.Event
+        }
+    }
+
+    $sections = [System.Collections.Generic.List[string]]::new()
+    if ($regions.Prefix) { $sections.Add($regions.Prefix.TrimEnd()) }
+    if ($orderedEvents.Count -gt 0) {
+        $hookTexts = foreach ($event in $orderedEvents) { $mergedBlocks[$event].TrimEnd() }
+        $sections.Add(($hookTexts -join ([Environment]::NewLine + [Environment]::NewLine)).TrimEnd())
+    }
+    if ($regions.Suffix) { $sections.Add($regions.Suffix.TrimEnd()) }
+    $newText = ($sections -join ([Environment]::NewLine + [Environment]::NewLine)).TrimEnd() + [Environment]::NewLine
 
     if ($DryRun) {
         Write-Host '[DRY-RUN] merged config.toml hooks block:'

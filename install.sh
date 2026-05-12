@@ -293,13 +293,13 @@ merge_config_toml_hooks() {
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 template_path, codex_home, python_cmd, output, begin_marker, end_marker, dry_run = sys.argv[1:8]
 template = Path(template_path).read_text(encoding="utf-8")
 rendered = template.replace("{{CODEX_HOME}}", json.dumps(codex_home)[1:-1])
 rendered = rendered.replace("{{PYTHON_EXE}}", json.dumps(python_cmd)[1:-1])
-managed_block = f"{begin_marker}\n{rendered.rstrip()}\n{end_marker}\n"
 
 path = Path(output)
 try:
@@ -307,9 +307,157 @@ try:
 except FileNotFoundError:
     current = ""
 
-pattern = re.compile(rf"(?ms)^[ \t]*{re.escape(begin_marker)}\n.*?^[ \t]*{re.escape(end_marker)}\n?")
-current = re.sub(pattern, "", current).rstrip()
-new_text = current + ("\n\n" if current else "") + managed_block
+managed_pattern = re.compile(
+    rf"(?ms)^[ \t]*{re.escape(begin_marker)}\n.*?^[ \t]*{re.escape(end_marker)}\n?"
+)
+current = re.sub(managed_pattern, "", current)
+
+EVENT_HEADER_RE = re.compile(r"^\[\[hooks\.([A-Za-z0-9_]+)\]\]\s*$")
+SUBHOOK_HEADER_RE = re.compile(r"^\[\[hooks\.([A-Za-z0-9_]+)\.hooks\]\]\s*$")
+ANY_HEADER_RE = re.compile(r"^\[")
+ORCHESTRATOR_SCRIPT_RE = re.compile(r"orchestrator_[^\\/\"']+\.py")
+
+def split_hook_region(text):
+    lines = text.splitlines(keepends=True)
+    start = None
+    end = None
+    for index, line in enumerate(lines):
+        if EVENT_HEADER_RE.match(line.strip()):
+            start = index
+            break
+    if start is None:
+        return text.rstrip(), "", ""
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        stripped = lines[index].strip()
+        if not stripped:
+            continue
+        if ANY_HEADER_RE.match(stripped) and not stripped.startswith("[[hooks."):
+            end = index
+            break
+    prefix = "".join(lines[:start]).rstrip()
+    hook_region = "".join(lines[start:end])
+    suffix = "".join(lines[end:]).lstrip("\n")
+    return prefix, hook_region, suffix
+
+def parse_event_blocks(text):
+    lines = text.splitlines(keepends=True)
+    blocks = []
+    current_event = None
+    current_lines = []
+    for line in lines:
+        match = EVENT_HEADER_RE.match(line.strip())
+        if match:
+            if current_event is not None:
+                blocks.append((current_event, "".join(current_lines)))
+            current_event = match.group(1)
+            current_lines = [line]
+            continue
+        if current_event is not None:
+            current_lines.append(line)
+    if current_event is not None:
+        blocks.append((current_event, "".join(current_lines)))
+    return blocks
+
+def split_event_block(block_text, event):
+    lines = block_text.splitlines(keepends=True)
+    header = []
+    subblocks = []
+    current_subblock = []
+    inside_subblock = False
+    expected_header = f"[[hooks.{event}.hooks]]"
+    for line in lines:
+        if line.strip() == expected_header:
+            if inside_subblock and current_subblock:
+                subblocks.append("".join(current_subblock))
+            current_subblock = [line]
+            inside_subblock = True
+            continue
+        if inside_subblock:
+            current_subblock.append(line)
+        else:
+            header.append(line)
+    if inside_subblock and current_subblock:
+        subblocks.append("".join(current_subblock))
+    return "".join(header), subblocks
+
+def normalize_block(block_text, event):
+    header, subblocks = split_event_block(block_text, event)
+    kept_subblocks = [
+        subblock for subblock in subblocks if not ORCHESTRATOR_SCRIPT_RE.search(subblock)
+    ]
+    if not kept_subblocks:
+        return None
+    header = header.rstrip() + "\n"
+    rendered = header
+    for subblock in kept_subblocks:
+        rendered += "\n" + subblock.rstrip() + "\n"
+    return rendered.rstrip() + "\n"
+
+def append_managed_hook(block_text, managed_block_text, event):
+    existing_header, existing_subblocks = split_event_block(block_text, event)
+    managed_header, managed_subblocks = split_event_block(managed_block_text, event)
+
+    if not existing_subblocks:
+        base_header = managed_header if managed_header.strip() else existing_header
+        existing_subblocks = []
+    else:
+        base_header = existing_header
+
+    existing_joined = "\n".join(existing_subblocks)
+    merged_subblocks = list(existing_subblocks)
+    for subblock in managed_subblocks:
+        if ORCHESTRATOR_SCRIPT_RE.search(subblock) and ORCHESTRATOR_SCRIPT_RE.search(existing_joined):
+            continue
+        merged_subblocks.append(subblock)
+        existing_joined += "\n" + subblock
+
+    result = base_header.rstrip() + "\n"
+    for subblock in merged_subblocks:
+        result += "\n" + subblock.rstrip() + "\n"
+    return result.rstrip() + "\n"
+
+prefix, hook_region, suffix = split_hook_region(current)
+existing_blocks = parse_event_blocks(hook_region)
+managed_blocks = parse_event_blocks(rendered)
+
+ordered_events = []
+merged_blocks = {}
+for event, block_text in existing_blocks:
+    normalized = normalize_block(block_text, event)
+    if normalized is None:
+        continue
+    if event not in ordered_events:
+        ordered_events.append(event)
+        merged_blocks[event] = normalized
+    else:
+        merged_blocks[event] = append_managed_hook(
+            merged_blocks[event], normalized, event
+        )
+
+for event, block_text in managed_blocks:
+    if event not in ordered_events:
+        ordered_events.append(event)
+        merged_blocks[event] = block_text.rstrip() + "\n"
+    else:
+        merged_blocks[event] = append_managed_hook(
+            merged_blocks[event], block_text, event
+        )
+
+sections = []
+if prefix:
+    sections.append(prefix.rstrip())
+if ordered_events:
+    hook_text = "\n\n".join(merged_blocks[event].rstrip() for event in ordered_events)
+    sections.append(hook_text.rstrip())
+if suffix:
+    sections.append(suffix.rstrip())
+new_text = "\n\n".join(section for section in sections if section) + "\n"
+
+try:
+    tomllib.loads(new_text)
+except tomllib.TOMLDecodeError as exc:
+    raise SystemExit(f"generated invalid config.toml: {exc}")
 
 if dry_run == "1":
     print(new_text)

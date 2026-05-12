@@ -55,11 +55,67 @@ for required in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
         raise SystemExit(f"config.toml mode missing hook: {required}")
 PY
 "$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex >/dev/null
-COUNT=$(grep -c 'BEGIN codex-orchestrator-kit managed hooks' "$CONFIG_CODEX/config.toml" | tr -d ' ')
-if [[ "$COUNT" != "1" ]]; then
-  echo "config.toml install is not idempotent: managed block appears $COUNT times" >&2
-  exit 1
-fi
+"$PYTHON_BIN" - "$CONFIG_CODEX/config.toml" <<'PY'
+import pathlib
+import tomllib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+obj = tomllib.loads(text)
+for required in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+    entries = obj["hooks"].get(required, [])
+    if len(entries) != 1:
+        raise SystemExit(f"config.toml install is not idempotent for {required}: {len(entries)} entries")
+PY
+
+EXISTING_HOOKS_CODEX="$TMP_ROOT/config-codex-existing-hooks"
+mkdir -p "$EXISTING_HOOKS_CODEX/skills"
+cat > "$EXISTING_HOOKS_CODEX/config.toml" <<'EOF'
+approval_policy = "never"
+
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+matcher = "startup|resume"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "python3 /Users/example/.codex/hooks/aiserver_session_context.py"
+timeout = 10
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "python3 /Users/example/.codex/hooks/aiserver_session_context.py"
+timeout = 10
+
+[tui.model_availability_nux]
+"gpt-5.5" = 1
+EOF
+"$ROOT/install.sh" --codex-home "$EXISTING_HOOKS_CODEX" --hook-mode config_toml --skills-mode codex >/dev/null
+"$PYTHON_BIN" - "$EXISTING_HOOKS_CODEX/config.toml" <<'PY'
+import pathlib
+import tomllib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+obj = tomllib.loads(text)
+user_prompt_entries = obj["hooks"]["UserPromptSubmit"]
+if len(user_prompt_entries) != 1:
+    raise SystemExit(f"expected one UserPromptSubmit block, got {len(user_prompt_entries)}")
+commands = [hook["command"] for hook in user_prompt_entries[0]["hooks"]]
+if not any("aiserver_session_context.py" in command for command in commands):
+    raise SystemExit("missing existing aiserver hook after config merge")
+if not any("orchestrator_user_prompt.py" in command for command in commands):
+    raise SystemExit("missing orchestrator user prompt hook after config merge")
+for required in ("PreToolUse", "PostToolUse", "Stop"):
+    if required not in obj["hooks"]:
+        raise SystemExit(f"missing {required} after config merge")
+PY
 
 if "$PYTHON_BIN" - "$ROOT/templates/review-profile.toml" <<'PY'
 import pathlib
