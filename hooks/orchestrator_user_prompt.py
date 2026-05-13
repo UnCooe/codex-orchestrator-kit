@@ -108,32 +108,21 @@ def _high_alert_context(alert: dict) -> str:
     )
 
 
+def _extract_prompt(payload: dict) -> str:
+    for key in ("prompt", "user_prompt", "message", "input"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def _heavy_context() -> str:
-    return (
-        "ORCHESTRATOR CHECK: Before broad tool use or edits, make a delegation decision. "
-        "For heavy work, explicitly use subagents/parallel agent work for research, implementation, "
-        "test design, review, or destructive critique. Keep the main thread for goals, tradeoffs, "
-        "conflict resolution, and acceptance. Ask subagents to return only conclusion, evidence, "
-        "risks, alternatives, and recommended action. Subagent slots are limited: track each agent id, "
-        "collect the result, then close it promptly unless there is a concrete same-workflow reason "
-        "to retain it. Exceptions: tiny single-file edits, simple "
-        "commands, explicit user request to work directly, or when subagent cost exceeds task value. "
-        "If not delegating a non-trivial task, state why. If subagents were used, final acceptance "
-        "must include 'Subagents: closed' or 'Subagents: retained because ...'. "
-        "When work was done, end with a compact acceptance footer containing "
-        "verification_status=..., review_status=..., subagent_status=..., risk_status=.... "
-        "Use this exact shape:\n"
-        "verification_status=pass\n"
-        "review_status=pass\n"
-        "subagent_status=closed\n"
-        "risk_status=low\n"
-        "The explicit lifecycle sentence and subagent_status must agree."
-    )
+    return "重任务提醒：先判断是否需要 subagent；如果不委托，请简短说明原因。完成工作后补 verification_status、review_status、subagent_status、risk_status。"
 
 
 def main() -> int:
     payload = json.load(sys.stdin)
-    prompt = payload.get("prompt", "")
+    prompt = _extract_prompt(payload)
     contexts = []
     alert = _claim_high_alert_reminder(payload)
     if alert:
