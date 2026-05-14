@@ -57,7 +57,7 @@ SUBAGENT_LIFECYCLE = [
 
 ACCEPTANCE_FIELDS = ("verification_status", "review_status", "subagent_status", "risk_status")
 ACCEPTANCE_FIELD_RE = re.compile(
-    r'(?im)(?:^|[,\n;])\s*"?(?P<field>verification_status|review_status|subagent_status|risk_status)"?\s*[:=]\s*(?P<value>[^,\n;\}\]]+)'
+    r'(?im)(?:^|[,\n;])\s*"?(?P<field>verification_status|review_status|subagent_status|risk_status)"?\s*[:=：]\s*(?P<value>[^,\n;\}\]]+)'
 )
 ACCEPTANCE_STATUS_MAP = {
     "verification_status": {"pass", "passed", "verified", "done", "completed", "ok", "yes", "true", "1", "validation"},
