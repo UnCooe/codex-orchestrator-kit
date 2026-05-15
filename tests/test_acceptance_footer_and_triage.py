@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(HOOKS))
 
 from analyze import build_report  # noqa: E402
+from orchestrator_observability import _detect_session_id  # noqa: E402
 from session_facts import extract_facts  # noqa: E402
 from subagent_workflow import build_report as build_subagent_workflow_report  # noqa: E402
 from triage import classify  # noqa: E402
@@ -26,6 +27,12 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 
 class AcceptanceFooterAndTriageTests(unittest.TestCase):
+    def test_detect_session_id_normalizes_rollout_filename(self) -> None:
+        session_id = _detect_session_id(
+            "/tmp/.codex/sessions/2026/05/15/rollout-2026-05-15T20-13-49-019e2668-493a-73c1-ba3c-391cbc8664bc.jsonl"
+        )
+        self.assertEqual(session_id, "019e2668-493a-73c1-ba3c-391cbc8664bc")
+
     def test_extract_facts_marks_partial_acceptance_footer(self) -> None:
         cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -229,11 +236,10 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                     {
                         "timestamp": "2026-05-02T00:02:00Z",
                         "session_id": "sess-1",
-                        "source": "orchestrator_user_prompt",
-                        "event": {
-                            "hook_event_name": "UserPromptSubmit",
-                            "status": "warn",
-                        },
+                        "event": "orchestrator_observability",
+                        "event_name": "user_prompt",
+                        "status": "warn",
+                        "reason": "acceptance_context",
                     },
                 ],
             )
@@ -251,6 +257,81 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(closure["open_sessions"], 1)
             self.assertEqual(closure["heavy_work_signal_quality"], "no_signal")
             self.assertEqual(output["visible_summary"]["first_line"], "Subagent 工作流复盘：triage")
+
+    def test_subagent_workflow_counts_only_heavy_prompt_detected_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "workflow.jsonl"
+            events = codex_home / "orchestrator-observability" / "events" / "2026-05-02.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"type": "session_meta", "payload": {"id": "sess-1", "cwd": "/repo/one"}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"timestamp": "2026-05-02T00:01:00Z", "payload": {"type": "function_call", "name": "spawn_agent", "arguments": {"task": "worker"}}},
+                ],
+            )
+            _write_jsonl(
+                events,
+                [
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "user_prompt",
+                        "status": "allow",
+                        "reason": "acceptance_context",
+                        "session_id": "sess-1",
+                        "created_at": "2026-05-02T00:00:30Z",
+                        "cwd": "/repo/one",
+                    },
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "user_prompt",
+                        "status": "warn",
+                        "reason": "heavy_prompt_detected",
+                        "session_id": "sess-1",
+                        "created_at": "2026-05-02T00:00:45Z",
+                        "cwd": "/repo/one",
+                    },
+                ],
+            )
+
+            output = build_subagent_workflow_report(
+                codex_home,
+                since_days=30,
+                report_id="workflow-heavy",
+                reports_dir=str(reports_root),
+                max_samples=5,
+            )
+
+            heavy = output["workflow_signals"]["heavy_work_delegation"]
+            self.assertEqual(heavy["signal_count"], 1)
+            self.assertEqual(heavy["signal_sessions"], 1)
+            self.assertEqual(heavy["signal_sessions_with_spawn"], 1)
+
+    def test_analyze_requires_subagent_status_only_when_signal_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "analyze.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "implemented a narrow fix. Verification: pass.",
+                        },
+                        "timestamp": "2026-05-02T00:00:00Z",
+                    }
+                ],
+            )
+
+            output = build_report(codex_home, since_days=30, report_id="analyze-subagent", max_samples=5, reports_dir=str(reports_root))
+
+            self.assertEqual(output["acceptance"].get("work_done_missing_subagent_status", 0), 0)
 
 
 if __name__ == "__main__":

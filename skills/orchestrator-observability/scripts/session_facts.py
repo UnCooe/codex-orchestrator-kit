@@ -106,21 +106,39 @@ def parse_timestamp(value: object) -> Optional[datetime]:
         return None
 
 
-def iter_jsonl_records(paths: Iterable[Path]) -> Iterator[tuple[Path, int, Optional[dict]]]:
+def iter_jsonl_records(paths: Iterable[Path]) -> Iterator[tuple[Path, int, Optional[object]]]:
     for path in paths:
         try:
-            raw_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            raw_text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             yield path, 0, None
             continue
 
-        for line_no, raw in enumerate(raw_lines, 1):
-            if not raw.strip():
-                continue
+        decoder = json.JSONDecoder()
+        cursor = 0
+        text_len = len(raw_text)
+        line_no = 1
+        while cursor < text_len:
+            while cursor < text_len and raw_text[cursor].isspace():
+                if raw_text[cursor] == "\n":
+                    line_no += 1
+                cursor += 1
+            if cursor >= text_len:
+                break
+
+            record_line = line_no
             try:
-                yield path, line_no, json.loads(raw)
-            except Exception:
-                yield path, line_no, None
+                record, end = decoder.raw_decode(raw_text, cursor)
+                yield path, record_line, record
+                line_no += raw_text[cursor:end].count("\n")
+                cursor = end
+            except json.JSONDecodeError:
+                yield path, record_line, None
+                next_newline = raw_text.find("\n", cursor)
+                if next_newline == -1:
+                    break
+                line_no += raw_text[cursor:next_newline + 1].count("\n")
+                cursor = next_newline + 1
 
 
 def _end_of_day(year: int, month: int, day: int) -> Optional[datetime]:
@@ -562,6 +580,9 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
         source_key = str(source_file.resolve())
         if record is None:
             stats["invalid_lines"] += 1
+            continue
+        if not isinstance(record, dict):
+            stats["non_dict_records"] = stats.get("non_dict_records", 0) + 1
             continue
 
         ts = parse_timestamp(record.get("created_at") or record.get("event_time") or record.get("timestamp"))

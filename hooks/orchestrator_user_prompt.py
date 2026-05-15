@@ -141,6 +141,14 @@ def main() -> int:
     if is_heavy:
         contexts.append(_heavy_context())
 
+    status = "warn" if (alert or is_heavy) else "allow"
+    if alert and not is_heavy:
+        reason = "high_risk_alert_reminder"
+    elif is_heavy:
+        reason = "heavy_prompt_detected"
+    else:
+        reason = "acceptance_context"
+
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -150,8 +158,8 @@ def main() -> int:
     emit_observability_event(
         payload,
         event_name="user_prompt",
-        status="warn",
-        reason="high_risk_alert_reminder" if alert and not is_heavy else ("heavy_prompt_detected" if is_heavy else "acceptance_context"),
+        status=status,
+        reason=reason,
         extra={"patterns_present": is_heavy, "high_risk_alert": bool(alert), "acceptance_context": True},
         text_source=prompt,
     )

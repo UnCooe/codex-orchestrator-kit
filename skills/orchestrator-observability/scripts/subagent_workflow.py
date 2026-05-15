@@ -394,10 +394,13 @@ def build_report(
                 closure["acceptance_footer_complete"] += 1
             elif row_dict.get("assistant_has_acceptance_footer", False):
                 closure["acceptance_footer_partial"] += 1
-            if row_dict.get("assistant_subagent_used", False) and not row_dict.get("assistant_has_subagent_lifecycle", False):
+            if (
+                row_dict.get("acceptance_has_subagent_signal", False)
+                and not row_dict.get("assistant_has_subagent_status", False)
+            ):
                 closure["work_done_missing_subagent_status"] += 1
 
-        if event_type == "orchestrator_user_prompt" and status == "warn":
+        if event_type == "orchestrator_user_prompt" and str(row_dict.get("reason", "")) == "heavy_prompt_detected":
             heavy_work_delegation_signals += 1
             if session_id:
                 per_session_heavy_signals[session_id] += 1

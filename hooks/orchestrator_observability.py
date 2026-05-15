@@ -51,6 +51,11 @@ _NORMALIZED_TOOL_NAMES = {
     "cmd": "powershell",
 }
 
+_ROLLOUT_SESSION_RE = re.compile(
+    r"(?P<session_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+
 
 def _flatten_text(value: Any) -> str:
     if isinstance(value, str):
@@ -107,6 +112,9 @@ def _detect_session_id(transcript_path: str | None) -> Optional[str]:
     except Exception:
         return None
     if path.suffix == ".jsonl":
+        match = _ROLLOUT_SESSION_RE.search(path.stem)
+        if match:
+            return match.group("session_id")
         return path.stem
     return None
 

@@ -29,6 +29,44 @@ def _set_mtime(path: Path, timestamp: str) -> None:
 
 
 class SessionFactSinceDaysTests(unittest.TestCase):
+    def test_tolerates_multiline_json_and_non_dict_records(self) -> None:
+        cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "multiline.jsonl"
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "session_meta",
+                                "payload": {"id": "multi-session", "cwd": "/repo/multi"},
+                                "timestamp": "2026-05-02T00:00:00Z",
+                            }
+                        ),
+                        "{",
+                        '  "payload": {',
+                        '    "type": "message",',
+                        '    "role": "assistant",',
+                        '    "content": "implemented multiline parsing. Verification: pass."',
+                        "  },",
+                        '  "timestamp": "2026-05-02T00:01:00Z"',
+                        "}",
+                        "229274",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            facts, stats = extract_facts([transcript], codex_home, cutoff)
+
+            assistant_facts = [fact for fact in facts if fact.event_type == "transcript_message_assistant"]
+            self.assertEqual(len(assistant_facts), 1)
+            self.assertEqual(assistant_facts[0].session_id, "multi-session")
+            self.assertEqual(stats.get("invalid_lines", 0), 0)
+            self.assertEqual(stats.get("non_dict_records", 0), 1)
+
     def test_skips_stale_session_files_without_reading_them(self) -> None:
         cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:

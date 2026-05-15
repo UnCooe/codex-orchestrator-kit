@@ -497,7 +497,11 @@ def build_report(
                 acceptance["work_done_messages"] += 1
             if row_dict.get("assistant_work_done", False) and not row_dict.get("assistant_has_verification", False):
                 acceptance["work_done_missing_verification"] += 1
-            if row_dict.get("assistant_work_done", False) and not row_dict.get("assistant_has_subagent_status", False):
+            if (
+                row_dict.get("assistant_work_done", False)
+                and row_dict.get("acceptance_has_subagent_signal", False)
+                and not row_dict.get("assistant_has_subagent_status", False)
+            ):
                 acceptance["work_done_missing_subagent_status"] += 1
             if row_dict.get("assistant_has_acceptance_footer", False):
                 acceptance["acceptance_footer_present"] += 1
