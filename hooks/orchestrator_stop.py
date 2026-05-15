@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -85,7 +84,6 @@ VERIFICATION_EXCEPTION_TOKENS = (
 )
 
 LOW_RISK_TOKENS = ("low", "none", "not significant", "低")
-STRICT_STOP_GATE = os.environ.get("ORCHESTRATOR_STOP_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def matches_any(patterns, text: str) -> bool:
@@ -157,16 +155,17 @@ def stop_gate_result(
     emit_observability_event(
         payload,
         event_name="stop",
-        status="blocked" if STRICT_STOP_GATE else "warn",
+        status="blocked",
         reason=reason,
         acceptance_source=acceptance_source,
         acceptance=acceptance,
         extra=extra,
     )
-    if STRICT_STOP_GATE:
-        print(json.dumps({"decision": "block", "reason": public_reason}))
-    else:
-        print(json.dumps({"continue": True}))
+    print(json.dumps({
+        "decision": "block",
+        "reason": public_reason,
+        "suppressOutput": True,
+    }))
     return 0
 
 

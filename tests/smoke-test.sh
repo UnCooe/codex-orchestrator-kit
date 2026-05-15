@@ -270,24 +270,11 @@ import json
 import sys
 
 obj = json.loads(sys.argv[1])
-if obj.get("continue") is not True:
-    raise SystemExit("Default Stop gate should silently allow low-risk partial verification after logging")
+if obj.get("decision") != "block" or obj.get("suppressOutput") is not True or "partial/not_run/blocked" not in obj.get("reason", ""):
+    raise SystemExit("Stop gate should block low-risk partial verification while suppressing UI output")
 PY
 
-STRICT_LOW_RISK_PARTIAL_STOP=$(cat <<'JSON' | ORCHESTRATOR_STOP_STRICT=1 "$PYTHON_BIN" "$STOP_HOOK"
-{"last_assistant_message":"implemented hook behavior.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}
-JSON
-)
-"$PYTHON_BIN" - "$STRICT_LOW_RISK_PARTIAL_STOP" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block" or "partial/not_run/blocked" not in obj.get("reason", ""):
-    raise SystemExit("Strict Stop gate should block partial verification with low risk")
-PY
-
-PARTIAL_STOP=$(cat <<'JSON' | ORCHESTRATOR_STOP_STRICT=1 "$PYTHON_BIN" "$STOP_HOOK"
+PARTIAL_STOP=$(cat <<'JSON' | "$PYTHON_BIN" "$STOP_HOOK"
 {"last_assistant_message":"implemented hook behavior.\nverification_status=pass\nreview_status=pass"}
 JSON
 )
@@ -296,8 +283,8 @@ import json
 import sys
 
 obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block" or "Acceptance footer is incomplete" not in obj.get("reason", ""):
-    raise SystemExit("Partial acceptance footer should be blocked")
+if obj.get("decision") != "block" or obj.get("suppressOutput") is not True or "Acceptance footer is incomplete" not in obj.get("reason", ""):
+    raise SystemExit("Partial acceptance footer should be blocked while suppressing UI output")
 PY
 
 SPACE_PY_DIR="$TMP_ROOT/python with space"

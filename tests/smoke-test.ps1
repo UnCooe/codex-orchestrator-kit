@@ -253,16 +253,14 @@ if (-not [string]::IsNullOrWhiteSpace(($postPassOutput -join ''))) {
 $stopMissingVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change in the portable kit, updated multiple files, and changed installer behavior for migration."}'
 Assert-JsonField -JsonText $stopMissingVerification -Predicate {
     param($value)
-    $value.continue -eq $true
-} -Message 'Default Stop hook should silently allow work-done messages after logging.'
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true
+} -Message 'Stop hook should block missing verification while suppressing UI output.'
 
-$env:ORCHESTRATOR_STOP_STRICT = '1'
 $stopPartialFooter = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=pass\nreview_status=pass"}'
-Remove-Item Env:ORCHESTRATOR_STOP_STRICT -ErrorAction SilentlyContinue
 Assert-JsonField -JsonText $stopPartialFooter -Predicate {
     param($value)
-    $value.decision -eq 'block' -and $value.reason -like '*Acceptance footer is incomplete*'
-} -Message 'Strict Stop hook did not block partial acceptance footer.'
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -like '*Acceptance footer is incomplete*'
+} -Message 'Stop hook did not block partial acceptance footer while suppressing UI output.'
 
 $stopPartialVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=medium；live client validation remains."}'
 Assert-JsonField -JsonText $stopPartialVerification -Predicate {
@@ -273,16 +271,8 @@ Assert-JsonField -JsonText $stopPartialVerification -Predicate {
 $stopLowRiskPartial = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}'
 Assert-JsonField -JsonText $stopLowRiskPartial -Predicate {
     param($value)
-    $value.continue -eq $true
-} -Message 'Default Stop hook should silently allow partial verification paired with low risk after logging.'
-
-$env:ORCHESTRATOR_STOP_STRICT = '1'
-$stopStrictLowRiskPartial = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}'
-Remove-Item Env:ORCHESTRATOR_STOP_STRICT -ErrorAction SilentlyContinue
-Assert-JsonField -JsonText $stopStrictLowRiskPartial -Predicate {
-    param($value)
-    $value.decision -eq 'block' -and $value.reason -like '*partial/not_run/blocked*'
-} -Message 'Strict Stop hook should block partial verification paired with low risk.'
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -like '*partial/not_run/blocked*'
+} -Message 'Stop hook should block partial verification paired with low risk while suppressing UI output.'
 
 $transcript = Join-Path $CodexHome 'transcript-subagent.jsonl'
 $transcriptContent = @(
@@ -295,8 +285,8 @@ $stopLifecyclePayload = @{ transcript_path = $transcript; last_assistant_message
 $stopLifecycleOutput = Invoke-PythonHook -Script $stopHook -InputJson $stopLifecyclePayload
 Assert-JsonField -JsonText $stopLifecycleOutput -Predicate {
     param($value)
-    $value.continue -eq $true
-} -Message 'Default Stop hook should silently allow missing subagent lifecycle after logging.'
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true
+} -Message 'Stop hook should block missing subagent lifecycle while suppressing UI output.'
 
 $stopPassPayload = @{
     transcript_path = $transcript
