@@ -202,14 +202,20 @@ $stopHook = Join-Path $CodexHome 'hooks\orchestrator_stop.py'
 $heavyPromptOutput = Invoke-PythonHook -Script $userPrompt -InputJson '{"prompt":"please implement this feature and add tests"}'
 Assert-JsonField -JsonText $heavyPromptOutput -Predicate {
     param($value)
+    $context = $value.hookSpecificOutput.additionalContext
     $value.hookSpecificOutput.hookEventName -eq 'UserPromptSubmit' -and
-    $value.hookSpecificOutput.additionalContext -like '*ORCHESTRATOR CHECK*'
+    $context -like '*ORCHESTRATOR CHECK*' -and
+    $context -like '*verification_status*' -and
+    $context -like '*Subagents: closed*'
 } -Message 'UserPromptSubmit heavy prompt did not inject orchestrator context.'
 
 $benignPromptOutput = Invoke-PythonHook -Script $userPrompt -InputJson '{"prompt":"what is 2+2?"}'
-if (-not [string]::IsNullOrWhiteSpace(($benignPromptOutput -join ''))) {
-    throw 'UserPromptSubmit benign prompt should not emit context.'
-}
+Assert-JsonField -JsonText $benignPromptOutput -Predicate {
+    param($value)
+    $context = $value.hookSpecificOutput.additionalContext
+    $context -like '*verification_status*' -and
+    $context -notlike '*ORCHESTRATOR CHECK*'
+} -Message 'UserPromptSubmit benign prompt should emit only acceptance context.'
 
 $preBlockOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"bash","tool_input":{"command":"rg --files"}}'
 Assert-JsonField -JsonText $preBlockOutput -Predicate {
@@ -656,9 +662,12 @@ $suppressedReminderOutput = Invoke-PythonHook -Script $userPrompt -InputJson (@{
     prompt = 'hello again'
     cwd = 'C:\safe\project'
 } | ConvertTo-Json -Compress)
-if (-not [string]::IsNullOrWhiteSpace(($suppressedReminderOutput -join ''))) {
-    throw 'UserPromptSubmit should suppress the same high-risk reminder within 24 hours.'
-}
+Assert-JsonField -JsonText $suppressedReminderOutput -Predicate {
+    param($value)
+    $context = $value.hookSpecificOutput.additionalContext
+    $context -like '*verification_status*' -and
+    $context -notlike '*ORCHESTRATOR HIGH-RISK ALERT*'
+} -Message 'UserPromptSubmit should suppress repeated high-risk reminder but keep acceptance context.'
 
 $alertState = Get-Content -Raw -Encoding UTF8 $currentAlert | ConvertFrom-Json
 $alertState.last_reminded_at = '2000-01-01T00:00:00Z'

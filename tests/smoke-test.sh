@@ -421,6 +421,36 @@ PY
 TRIAGE="$AGENTS_HOME/skills/orchestrator-observability/scripts/triage.py"
 USER_PROMPT="$CODEX_HOME/hooks/orchestrator_user_prompt.py"
 
+BENIGN_PROMPT=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
+{"prompt":"what is 2+2?","cwd":"/safe/project"}
+JSON
+)
+"$PYTHON_BIN" - "$BENIGN_PROMPT" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+context = obj["hookSpecificOutput"]["additionalContext"]
+if "verification_status" not in context or "Subagents: closed" not in context:
+    raise SystemExit("Benign prompt did not receive acceptance context")
+if "ORCHESTRATOR CHECK" in context:
+    raise SystemExit("Benign prompt should not receive heavy prompt context")
+PY
+
+HEAVY_PROMPT=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
+{"prompt":"please implement this feature and add tests","cwd":"/safe/project"}
+JSON
+)
+"$PYTHON_BIN" - "$HEAVY_PROMPT" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+context = obj["hookSpecificOutput"]["additionalContext"]
+if "verification_status" not in context or "Subagents: closed" not in context or "ORCHESTRATOR CHECK" not in context:
+    raise SystemExit("Heavy prompt did not receive acceptance and heavy contexts")
+PY
+
 HIGH_REPORT="$REPORT_DIR/orchestrator-observability-high-smoke.json"
 cat > "$HIGH_REPORT" <<'JSON'
 {
@@ -486,10 +516,17 @@ SUPPRESSED=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
 {"prompt":"hello again","cwd":"/safe/project"}
 JSON
 )
-if [[ -n "$SUPPRESSED" ]]; then
-  echo "High-risk reminder should be suppressed within 24 hours" >&2
-  exit 1
-fi
+"$PYTHON_BIN" - "$SUPPRESSED" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+context = obj["hookSpecificOutput"]["additionalContext"]
+if "verification_status" not in context:
+    raise SystemExit("Acceptance context missing after high-risk reminder suppression")
+if "ORCHESTRATOR HIGH-RISK ALERT" in context:
+    raise SystemExit("High-risk reminder should be suppressed within 24 hours")
+PY
 
 LOW_REPORT="$REPORT_DIR/orchestrator-observability-low-smoke.json"
 cat > "$LOW_REPORT" <<'JSON'

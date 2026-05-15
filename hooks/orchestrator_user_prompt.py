@@ -116,8 +116,15 @@ def _extract_prompt(payload: dict) -> str:
     return ""
 
 
+def _acceptance_context() -> str:
+    return (
+        "收尾要求：最终答复需包含 verification_status、review_status、subagent_status、risk_status；"
+        "若本轮用过 subagent，还必须写 Subagents: closed 或 Subagents: retained because ..."
+    )
+
+
 def _heavy_context() -> str:
-    return "重任务提醒：先判断是否需要 subagent；如果不委托，请简短说明原因。完成工作后补 verification_status、review_status、subagent_status、risk_status。"
+    return "ORCHESTRATOR CHECK: 先判断是否需要 subagent；如果不委托，请简短说明原因。"
 
 
 def main() -> int:
@@ -128,19 +135,11 @@ def main() -> int:
     if alert:
         contexts.append(_high_alert_context(alert))
 
+    contexts.append(_acceptance_context())
+
     is_heavy = any(re.search(pattern, prompt, re.IGNORECASE) for pattern in HEAVY_PATTERNS)
     if is_heavy:
         contexts.append(_heavy_context())
-
-    if not contexts:
-        emit_observability_event(
-            payload,
-            event_name="user_prompt",
-            status="allow",
-            reason="light_prompt",
-            text_source=prompt,
-        )
-        return 0
 
     print(json.dumps({
         "hookSpecificOutput": {
@@ -152,8 +151,8 @@ def main() -> int:
         payload,
         event_name="user_prompt",
         status="warn",
-        reason="high_risk_alert_reminder" if alert and not is_heavy else "heavy_prompt_detected",
-        extra={"patterns_present": is_heavy, "high_risk_alert": bool(alert)},
+        reason="high_risk_alert_reminder" if alert and not is_heavy else ("heavy_prompt_detected" if is_heavy else "acceptance_context"),
+        extra={"patterns_present": is_heavy, "high_risk_alert": bool(alert), "acceptance_context": True},
         text_source=prompt,
     )
     return 0
