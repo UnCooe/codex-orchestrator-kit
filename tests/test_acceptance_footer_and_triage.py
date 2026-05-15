@@ -57,6 +57,70 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertFalse(fact.assistant_acceptance_footer_complete)
             self.assertEqual(fact.assistant_acceptance_footer_field_count, 2)
 
+    def test_extract_facts_accepts_fullwidth_colon_footer(self) -> None:
+        cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "footer.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": (
+                                "已完成检查。\n"
+                                "verification_status：已完成只读核对\n"
+                                "review_status：已检查\n"
+                                "subagent_status：not_used\n"
+                                "risk_status：低"
+                            ),
+                        },
+                        "timestamp": "2026-05-02T00:00:00Z",
+                    }
+                ],
+            )
+
+            facts, _stats = extract_facts([transcript], codex_home, cutoff)
+
+            self.assertEqual(len(facts), 1)
+            fact = facts[0]
+            self.assertTrue(fact.assistant_acceptance_footer_complete)
+            self.assertFalse(fact.acceptance_footer_verification_fail)
+
+    def test_extract_facts_allows_explained_partial_verification(self) -> None:
+        cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "footer.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": (
+                                "implemented workflow check.\n"
+                                "verification_status=partial；ran smoke checks but deferred live client validation.\n"
+                                "review_status=pass\n"
+                                "subagent_status=not_used\n"
+                                "risk_status=medium；live client validation remains."
+                            ),
+                        },
+                        "timestamp": "2026-05-02T00:00:00Z",
+                    }
+                ],
+            )
+
+            facts, _stats = extract_facts([transcript], codex_home, cutoff)
+
+            self.assertEqual(len(facts), 1)
+            fact = facts[0]
+            self.assertTrue(fact.assistant_acceptance_footer_complete)
+            self.assertFalse(fact.acceptance_footer_verification_fail)
+
     def test_build_report_compares_footer_trend_against_previous_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_home = Path(temp_dir) / ".codex"

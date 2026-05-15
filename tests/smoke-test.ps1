@@ -262,6 +262,18 @@ Assert-JsonField -JsonText $stopPartialFooter -Predicate {
     $value.decision -eq 'block' -and $value.reason -like '*Acceptance footer is incomplete*'
 } -Message 'Stop hook did not block partial acceptance footer.'
 
+$stopPartialVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=medium；live client validation remains."}'
+Assert-JsonField -JsonText $stopPartialVerification -Predicate {
+    param($value)
+    $value.continue -eq $true
+} -Message 'Stop hook should allow explained partial verification with non-low risk.'
+
+$stopLowRiskPartial = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}'
+Assert-JsonField -JsonText $stopLowRiskPartial -Predicate {
+    param($value)
+    $value.decision -eq 'block' -and $value.reason -like '*partial/not_run/blocked*'
+} -Message 'Stop hook should block partial verification paired with low risk.'
+
 $transcript = Join-Path $CodexHome 'transcript-subagent.jsonl'
 $transcriptContent = @(
     '{"payload":{"type":"message","role":"user","content":"implement a feature"}}',

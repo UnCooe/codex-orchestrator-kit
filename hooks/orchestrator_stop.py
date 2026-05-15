@@ -60,11 +60,30 @@ ACCEPTANCE_FIELD_RE = re.compile(
     r'(?im)(?:^|[,\n;])\s*"?(?P<field>verification_status|review_status|subagent_status|risk_status)"?\s*[:=：]\s*(?P<value>[^,\n;\}\]]+)'
 )
 ACCEPTANCE_STATUS_MAP = {
-    "verification_status": {"pass", "passed", "verified", "done", "completed", "ok", "yes", "true", "1", "validation"},
-    "review_status": {"pass", "passed", "reviewed", "done", "completed", "ok", "yes", "true", "1", "not_required", "n/a", "na"},
-    "subagent_status": {"closed", "retained because", "retained", "not used", "none", "n/a", "na", "not_required"},
-    "risk_status": {"low", "moderate", "medium", "manageable", "acceptable", "none", "ok", "yes", "true", "1", "not significant"},
+    "verification_status": {"pass", "passed", "verified", "done", "completed", "ok", "yes", "true", "1", "checked", "已完成", "已验证", "已检查", "已核对", "已执行", "完成", "通过"},
+    "review_status": {"pass", "passed", "reviewed", "done", "completed", "ok", "yes", "true", "1", "not_required", "n/a", "na", "已检查", "已核对", "完成", "通过"},
+    "subagent_status": {"closed", "retained because", "retained", "not used", "not_used", "none", "n/a", "na", "not_required"},
+    "risk_status": {"low", "moderate", "medium", "manageable", "acceptable", "none", "ok", "yes", "true", "1", "not significant", "低", "中", "中等", "可控"},
 }
+
+VERIFICATION_EXCEPTION_TOKENS = (
+    "partial",
+    "not_run",
+    "not run",
+    "blocked",
+    "read-only",
+    "readonly",
+    "static",
+    "只读",
+    "部分",
+    "未运行",
+    "未执行",
+    "未做",
+    "无法运行",
+    "阻塞",
+)
+
+LOW_RISK_TOKENS = ("low", "none", "not significant", "低")
 
 
 def matches_any(patterns, text: str) -> bool:
@@ -77,7 +96,39 @@ def is_status_positive(field: str, value: str) -> bool:
         return False
     if any(bad in normalized for bad in ("critical", "high", "unacceptable", "open", "unknown", "fail", "blocked")):
         return False
-    return any(token in normalized for token in ACCEPTANCE_STATUS_MAP.get(field, set()))
+    head = re.split(r"[\s,，;；。]+", normalized.replace("：", ":"), maxsplit=1)[0].rstrip(":")
+    for token in ACCEPTANCE_STATUS_MAP.get(field, set()):
+        if any("\u4e00" <= char <= "\u9fff" for char in token):
+            if normalized.startswith(token):
+                return True
+        elif " " in token:
+            if normalized.startswith(token):
+                return True
+        elif head == token:
+            return True
+    return False
+
+
+def has_short_note(value: str) -> bool:
+    return len(str(value).strip()) >= 12
+
+
+def is_low_risk(value: str) -> bool:
+    normalized = str(value).strip().lower()
+    if any(bad in normalized for bad in ("medium", "moderate", "high", "critical", "中", "高")):
+        return False
+    return any(token in normalized for token in LOW_RISK_TOKENS)
+
+
+def is_verification_exception_acceptable(value: str, risk_value: str) -> bool:
+    normalized = str(value).strip().lower()
+    if not normalized or not has_short_note(value):
+        return False
+    if not any(token in normalized for token in VERIFICATION_EXCEPTION_TOKENS):
+        return False
+    if "partial" in normalized or "部分" in normalized:
+        return not is_low_risk(risk_value)
+    return True
 
 
 def parse_acceptance_footer(message: str) -> dict[str, str]:
@@ -301,10 +352,15 @@ def main() -> int:
         return 0
 
     if acceptance_source == "structured":
-        verification_ok = is_status_positive("verification_status", acceptance_fields.get("verification_status", ""))
+        verification_value = acceptance_fields.get("verification_status", "")
+        risk_value = acceptance_fields.get("risk_status", "")
+        verification_ok = (
+            is_status_positive("verification_status", verification_value)
+            or is_verification_exception_acceptable(verification_value, risk_value)
+        )
         review_ok = is_status_positive("review_status", acceptance_fields.get("review_status", ""))
         subagent_ok = is_status_positive("subagent_status", acceptance_fields.get("subagent_status", ""))
-        risk_ok = is_status_positive("risk_status", acceptance_fields.get("risk_status", ""))
+        risk_ok = is_status_positive("risk_status", risk_value)
 
         if did_work and not verification_ok:
             emit_observability_event(
@@ -318,7 +374,10 @@ def main() -> int:
             )
             print(json.dumps({
                 "decision": "block",
-                "reason": "Structured acceptance footer indicates verification is incomplete. Add verification_status=pass and a short note why."
+                "reason": (
+                    "verification_status is not acceptable. Use pass only for complete verification. "
+                    "For partial/not_run/blocked verification, keep that status but add a short note and a non-low risk_status."
+                )
             }))
             return 0
 

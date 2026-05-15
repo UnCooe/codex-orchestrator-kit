@@ -44,17 +44,34 @@ VERIFICATION_PATTERNS = [
 
 ACCEPTANCE_FIELDS = ("verification_status", "review_status", "subagent_status", "risk_status")
 ACCEPTANCE_FIELD_RE = re.compile(
-    r'(?im)(?:^|[,\n;])\s*"?(?P<field>verification_status|review_status|subagent_status|risk_status)"?\s*[:=]\s*(?P<value>[^,\n;\}\]]+)'
+    r'(?im)(?:^|[,\n;])\s*"?(?P<field>verification_status|review_status|subagent_status|risk_status)"?\s*[:=：]\s*(?P<value>[^,\n;\}\]]+)'
 )
 
 WORK_DONE_RE = [re.compile(pattern, re.IGNORECASE) for pattern in WORK_DONE_PATTERNS]
 VERIFICATION_RE = [re.compile(pattern, re.IGNORECASE) for pattern in VERIFICATION_PATTERNS]
 ACCEPTANCE_STATUS_MAP = {
-    "verification_status": {"pass", "passed", "verified", "done", "completed", "ok", "yes", "true", "1", "validation"},
-    "review_status": {"pass", "passed", "reviewed", "done", "completed", "ok", "yes", "true", "1", "not_required", "n/a", "na"},
-    "subagent_status": {"closed", "retained because", "retained", "not used", "none", "n/a", "na", "not_required"},
-    "risk_status": {"low", "moderate", "medium", "manageable", "acceptable", "none", "ok", "yes", "true", "1", "not significant"},
+    "verification_status": {"pass", "passed", "verified", "done", "completed", "ok", "yes", "true", "1", "checked", "已完成", "已验证", "已检查", "已核对", "已执行", "完成", "通过"},
+    "review_status": {"pass", "passed", "reviewed", "done", "completed", "ok", "yes", "true", "1", "not_required", "n/a", "na", "已检查", "已核对", "完成", "通过"},
+    "subagent_status": {"closed", "retained because", "retained", "not used", "not_used", "none", "n/a", "na", "not_required"},
+    "risk_status": {"low", "moderate", "medium", "manageable", "acceptable", "none", "ok", "yes", "true", "1", "not significant", "低", "中", "中等", "可控"},
 }
+VERIFICATION_EXCEPTION_TOKENS = (
+    "partial",
+    "not_run",
+    "not run",
+    "blocked",
+    "read-only",
+    "readonly",
+    "static",
+    "只读",
+    "部分",
+    "未运行",
+    "未执行",
+    "未做",
+    "无法运行",
+    "阻塞",
+)
+LOW_RISK_TOKENS = ("low", "none", "not significant", "低")
 FILE_TIMESTAMP_PATTERNS = [
     re.compile(r"\b(?P<ts>\d{4}-\d{2}-\d{2}T\d{6})\b"),
     re.compile(r"\b(?P<ts>\d{4}_\d{2}_\d{2}T\d{6})\b"),
@@ -336,7 +353,39 @@ def _acceptance_status_positive(field: str, value: object) -> bool:
         return False
     if any(bad in normalized for bad in ("critical", "high", "unacceptable", "open", "unknown", "fail", "blocked")):
         return False
-    return any(token in normalized for token in ACCEPTANCE_STATUS_MAP.get(field, set()))
+    head = re.split(r"[\s,，;；。]+", normalized.replace("：", ":"), maxsplit=1)[0].rstrip(":")
+    for token in ACCEPTANCE_STATUS_MAP.get(field, set()):
+        if any("\u4e00" <= char <= "\u9fff" for char in token):
+            if normalized.startswith(token):
+                return True
+        elif " " in token:
+            if normalized.startswith(token):
+                return True
+        elif head == token:
+            return True
+    return False
+
+
+def _has_short_note(value: object) -> bool:
+    return len(str(value or "").strip()) >= 12
+
+
+def _risk_status_low(value: object) -> bool:
+    normalized = str(value or "").strip().lower()
+    if any(bad in normalized for bad in ("medium", "moderate", "high", "critical", "中", "高")):
+        return False
+    return any(token in normalized for token in LOW_RISK_TOKENS)
+
+
+def _verification_exception_acceptable(value: object, risk_value: object) -> bool:
+    normalized = str(value or "").strip().lower()
+    if not normalized or not _has_short_note(value):
+        return False
+    if not any(token in normalized for token in VERIFICATION_EXCEPTION_TOKENS):
+        return False
+    if "partial" in normalized or "部分" in normalized:
+        return not _risk_status_low(risk_value)
+    return True
 
 
 def extract_source_file(codex_home: Path, path: Path) -> str:
@@ -658,7 +707,10 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
                 acceptance_has_verification_signal=_to_bool(acceptance.get("has_verification_signal")),
                 acceptance_has_subagent_signal=_to_bool(acceptance.get("has_subagent_signal")),
                 acceptance_is_structured_complete=structured_complete,
-                acceptance_footer_verification_fail=structured_complete and not _acceptance_status_positive("verification_status", verification_status),
+                acceptance_footer_verification_fail=structured_complete and not (
+                    _acceptance_status_positive("verification_status", verification_status)
+                    or _verification_exception_acceptable(verification_status, risk_status)
+                ),
                 acceptance_footer_review_fail=structured_complete and not _acceptance_status_positive("review_status", review_status),
                 acceptance_footer_subagent_fail=structured_complete and not _acceptance_status_positive("subagent_status", subagent_status),
                 acceptance_footer_risk_fail=structured_complete and not _acceptance_status_positive("risk_status", risk_status),
