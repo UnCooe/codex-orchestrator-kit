@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -84,6 +85,7 @@ VERIFICATION_EXCEPTION_TOKENS = (
 )
 
 LOW_RISK_TOKENS = ("low", "none", "not significant", "低")
+STRICT_STOP_GATE = os.environ.get("ORCHESTRATOR_STOP_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def matches_any(patterns, text: str) -> bool:
@@ -96,7 +98,7 @@ def is_status_positive(field: str, value: str) -> bool:
         return False
     if any(bad in normalized for bad in ("critical", "high", "unacceptable", "open", "unknown", "fail", "blocked")):
         return False
-    head = re.split(r"[\s,，;；。]+", normalized.replace("：", ":"), maxsplit=1)[0].rstrip(":")
+    head = re.split(r"[\s,，;；。:]+", normalized.replace("：", ":"), maxsplit=1)[0]
     for token in ACCEPTANCE_STATUS_MAP.get(field, set()):
         if any("\u4e00" <= char <= "\u9fff" for char in token):
             if normalized.startswith(token):
@@ -141,6 +143,31 @@ def parse_acceptance_footer(message: str) -> dict[str, str]:
         value = match.group("value").strip().strip('\'"`')
         values[key] = value
     return values
+
+
+def stop_gate_result(
+    payload: dict,
+    *,
+    reason: str,
+    public_reason: str,
+    acceptance_source: str,
+    acceptance: dict[str, object],
+    extra: dict[str, object] | None = None,
+) -> int:
+    emit_observability_event(
+        payload,
+        event_name="stop",
+        status="blocked" if STRICT_STOP_GATE else "warn",
+        reason=reason,
+        acceptance_source=acceptance_source,
+        acceptance=acceptance,
+        extra=extra,
+    )
+    if STRICT_STOP_GATE:
+        print(json.dumps({"decision": "block", "reason": public_reason}))
+    else:
+        print(json.dumps({"continue": True}))
+    return 0
 
 
 def missing_acceptance_fields(fields: dict[str, str]) -> list[str]:
@@ -247,34 +274,31 @@ def main() -> int:
             if subagent_ok:
                 has_subagent_lifecycle = True
             else:
-                emit_observability_event(
+                return stop_gate_result(
                     payload,
-                    event_name="stop",
-                    status="blocked",
                     reason="acceptance_footer_subagent_status_reject",
-                    acceptance_source=acceptance_source,
-                    acceptance=base_acceptance(acceptance_source),
-                    extra={**acceptance_fields},
-                )
-                print(json.dumps({
-                    "decision": "block",
-                    "reason": (
+                    public_reason=(
                         "Structured acceptance footer indicates subagent_status is not closed/retained. "
                         "Before finalizing, include a complete acceptance footer with verification_status, "
                         "review_status, subagent_status, and risk_status, and state the lifecycle outcome: "
                         "'Subagents: closed' or 'Subagents: retained because ...'."
                     ),
-                }))
-                return 0
+                    acceptance_source=acceptance_source,
+                    acceptance=base_acceptance(acceptance_source),
+                    extra={**acceptance_fields},
+                )
         else:
             acceptance_source = "heuristic"
 
     if used_subagents and not has_subagent_lifecycle:
-        emit_observability_event(
+        return stop_gate_result(
             payload,
-            event_name="stop",
-            status="blocked",
             reason="subagent_lifecycle_missing",
+            public_reason=(
+                "Subagent usage was detected. Before finalizing, add a complete acceptance footer "
+                "(verification_status, review_status, subagent_status, risk_status) and state the lifecycle "
+                "outcome: 'Subagents: closed' or 'Subagents: retained because ...'."
+            ),
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
             extra={
@@ -282,22 +306,16 @@ def main() -> int:
                 "has_verification": has_verification,
             },
         )
-        print(json.dumps({
-            "decision": "block",
-            "reason": (
-                "Subagent usage was detected. Before finalizing, add a complete acceptance footer "
-                "(verification_status, review_status, subagent_status, risk_status) and state the lifecycle "
-                "outcome: 'Subagents: closed' or 'Subagents: retained because ...'."
-            ),
-        }))
-        return 0
 
     if did_work and acceptance_source == "partial":
-        emit_observability_event(
+        return stop_gate_result(
             payload,
-            event_name="stop",
-            status="blocked",
             reason="acceptance_footer_incomplete",
+            public_reason=(
+                "Acceptance footer is incomplete. Add these fields before finalizing: "
+                + ", ".join(footer_missing)
+                + "."
+            ),
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
             extra={
@@ -305,22 +323,16 @@ def main() -> int:
                 "missing_fields": footer_missing,
             },
         )
-        print(json.dumps({
-            "decision": "block",
-            "reason": (
-                "Acceptance footer is incomplete. Add these fields before finalizing: "
-                + ", ".join(footer_missing)
-                + "."
-            ),
-        }))
-        return 0
 
     if did_work and acceptance_source == "missing":
-        emit_observability_event(
+        return stop_gate_result(
             payload,
-            event_name="stop",
-            status="blocked",
             reason="acceptance_footer_missing",
+            public_reason=(
+                "Work completion was detected without the required acceptance footer. "
+                "Before finalizing, add verification_status, review_status, subagent_status, "
+                "and risk_status, plus short notes for tests/checks run or why not run."
+            ),
             acceptance_source="missing",
             acceptance=base_acceptance("missing"),
             extra={
@@ -329,15 +341,6 @@ def main() -> int:
                 "has_subagent_signal": used_subagents,
             },
         )
-        print(json.dumps({
-            "decision": "block",
-            "reason": (
-                "Work completion was detected without the required acceptance footer. "
-                "Before finalizing, add verification_status, review_status, subagent_status, "
-                "and risk_status, plus short notes for tests/checks run or why not run."
-            ),
-        }))
-        return 0
 
     if len(message) < 80:
         emit_observability_event(
@@ -363,71 +366,47 @@ def main() -> int:
         risk_ok = is_status_positive("risk_status", risk_value)
 
         if did_work and not verification_ok:
-            emit_observability_event(
+            return stop_gate_result(
                 payload,
-                event_name="stop",
-                status="blocked",
                 reason="acceptance_footer_verification_fail",
+                public_reason=(
+                    "verification_status is not acceptable. Use pass only for complete verification. "
+                    "For partial/not_run/blocked verification, keep that status but add a short note and a non-low risk_status."
+                ),
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields, "has_verification": False},
             )
-            print(json.dumps({
-                "decision": "block",
-                "reason": (
-                    "verification_status is not acceptable. Use pass only for complete verification. "
-                    "For partial/not_run/blocked verification, keep that status but add a short note and a non-low risk_status."
-                )
-            }))
-            return 0
 
         if did_work and not review_ok:
-            emit_observability_event(
+            return stop_gate_result(
                 payload,
-                event_name="stop",
-                status="blocked",
                 reason="acceptance_footer_review_fail",
+                public_reason="Structured acceptance footer indicates review is incomplete. Add review_status=pass or an explicit exception.",
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields, "has_review": False},
             )
-            print(json.dumps({
-                "decision": "block",
-                "reason": "Structured acceptance footer indicates review is incomplete. Add review_status=pass or an explicit exception."
-            }))
-            return 0
 
         if used_subagents and not subagent_ok:
-            emit_observability_event(
+            return stop_gate_result(
                 payload,
-                event_name="stop",
-                status="blocked",
                 reason="acceptance_footer_subagent_status_reject",
+                public_reason="Structured acceptance footer indicates subagent_status is not closed/retained.",
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields},
             )
-            print(json.dumps({
-                "decision": "block",
-                "reason": "Structured acceptance footer indicates subagent_status is not closed/retained."
-            }))
-            return 0
 
         if not risk_ok:
-            emit_observability_event(
+            return stop_gate_result(
                 payload,
-                event_name="stop",
-                status="blocked",
                 reason="acceptance_footer_risk_fail",
+                public_reason="Structured acceptance footer indicates risk status is unresolved/high.",
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields},
             )
-            print(json.dumps({
-                "decision": "block",
-                "reason": "Structured acceptance footer indicates risk status is unresolved/high.",
-            }))
-            return 0
 
         emit_observability_event(
             payload,

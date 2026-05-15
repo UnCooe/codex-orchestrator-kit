@@ -353,7 +353,7 @@ def _acceptance_status_positive(field: str, value: object) -> bool:
         return False
     if any(bad in normalized for bad in ("critical", "high", "unacceptable", "open", "unknown", "fail", "blocked")):
         return False
-    head = re.split(r"[\s,，;；。]+", normalized.replace("：", ":"), maxsplit=1)[0].rstrip(":")
+    head = re.split(r"[\s,，;；。:]+", normalized.replace("：", ":"), maxsplit=1)[0]
     for token in ACCEPTANCE_STATUS_MAP.get(field, set()):
         if any("\u4e00" <= char <= "\u9fff" for char in token):
             if normalized.startswith(token):
