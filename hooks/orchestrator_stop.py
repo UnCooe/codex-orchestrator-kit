@@ -38,6 +38,31 @@ VERIFICATION = [
     "\u672a\u8fd0\u884c",
 ]
 
+HEAVY_PATTERNS = [
+    r"\bimplement\b",
+    r"\bfix\b",
+    r"\brefactor\b",
+    r"\breview\b",
+    r"\binvestigate\b",
+    r"\banaly[sz]e\b",
+    r"\btest\b",
+    r"\bdebug\b",
+    r"\bmigrate\b",
+    r"\barchitecture\b",
+    r"\bdesign\b",
+    r"\brepo\b",
+    r"\bcodebase\b",
+    "实现",
+    "修复",
+    "代码",
+    "仓库",
+    "调研",
+    "测试",
+    "审查",
+    "方案",
+    "风险",
+]
+
 SUBAGENT_MARKERS = [
     '"name":"spawn_agent"',
     '"name": "spawn_agent"',
@@ -143,6 +168,34 @@ def parse_acceptance_footer(message: str) -> dict[str, str]:
     return values
 
 
+def _load_turn_items(transcript_path: str | None) -> list[dict]:
+    if not transcript_path:
+        return []
+    try:
+        lines = Path(transcript_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return []
+
+    last_user_index = -1
+    parsed: list[dict | None] = []
+    for index, line in enumerate(lines):
+        try:
+            item = json.loads(line)
+        except Exception:
+            parsed.append(None)
+            continue
+        parsed.append(item)
+        payload = item.get("payload", {}) if isinstance(item, dict) else {}
+        if payload.get("type") == "message" and payload.get("role") == "user":
+            content_text = str(payload.get("content", ""))
+            if "<hook_prompt" not in content_text:
+                last_user_index = index
+
+    if last_user_index < 0:
+        return []
+    return [item for item in parsed[last_user_index + 1:] if isinstance(item, dict)]
+
+
 def stop_gate_result(
     payload: dict,
     *,
@@ -197,28 +250,30 @@ def acceptance_payload(
 
 
 def current_turn_text(transcript_path: str | None) -> str:
+    items = _load_turn_items(transcript_path)
+    if not items:
+        return ""
+    return "\n".join(json.dumps(item, ensure_ascii=False) for item in items)[-120000:].lower()
+
+
+def current_user_prompt_text(transcript_path: str | None) -> str:
     if not transcript_path:
         return ""
     try:
         lines = Path(transcript_path).read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
         return ""
-
-    last_user_index = -1
-    for index, line in enumerate(lines):
+    for line in reversed(lines):
         try:
             item = json.loads(line)
         except Exception:
             continue
-        payload = item.get("payload", {})
+        payload = item.get("payload", {}) if isinstance(item, dict) else {}
         if payload.get("type") == "message" and payload.get("role") == "user":
             content_text = str(payload.get("content", ""))
             if "<hook_prompt" not in content_text:
-                last_user_index = index
-
-    if last_user_index < 0:
-        return ""
-    return "\n".join(lines[last_user_index + 1:])[-120000:].lower()
+                return content_text.lower()
+    return ""
 
 
 def transcript_has_subagent_signal(transcript_path: str | None) -> bool:
@@ -226,6 +281,32 @@ def transcript_has_subagent_signal(transcript_path: str | None) -> bool:
     if not text:
         return False
     return any(marker in text for marker in SUBAGENT_MARKERS)
+
+
+def current_turn_subagent_counts(transcript_path: str | None) -> tuple[int, int]:
+    text = current_turn_text(transcript_path)
+    if not text:
+        return 0, 0
+    spawn_count = len(re.findall(r'"name"\s*:\s*"spawn_agent"|<subagent_notification', text))
+    close_count = len(re.findall(r'"name"\s*:\s*"close_agent"', text))
+    return spawn_count, close_count
+
+
+def current_turn_is_heavy(transcript_path: str | None) -> bool:
+    prompt_text = current_user_prompt_text(transcript_path)
+    if not prompt_text:
+        return False
+    return matches_any(HEAVY_PATTERNS, prompt_text)
+
+
+def subagent_status_has_reason(value: str) -> bool:
+    normalized = str(value).strip()
+    if not normalized:
+        return False
+    head = re.split(r"[\s,，;；。:：]+", normalized.lower(), maxsplit=1)[0]
+    if head not in {"not_used", "not", "none", "closed", "pass"} and "not used" not in normalized.lower():
+        return True
+    return has_short_note(normalized)
 
 
 def main() -> int:
@@ -244,6 +325,8 @@ def main() -> int:
     message = payload.get("last_assistant_message") or ""
     message_lower = str(message).lower()
     used_subagents = transcript_has_subagent_signal(payload.get("transcript_path"))
+    spawn_count, close_count = current_turn_subagent_counts(payload.get("transcript_path"))
+    is_heavy_turn = current_turn_is_heavy(payload.get("transcript_path"))
     has_subagent_lifecycle = matches_any(SUBAGENT_LIFECYCLE, message)
     acceptance_fields = parse_acceptance_footer(message)
     footer_missing = missing_acceptance_fields(acceptance_fields)
@@ -289,6 +372,19 @@ def main() -> int:
         else:
             acceptance_source = "heuristic"
 
+    if used_subagents and spawn_count > close_count and "subagents: retained because" not in message_lower:
+        return stop_gate_result(
+            payload,
+            reason="subagent_close_missing",
+            public_reason=(
+                "Current turn spawned subagents without enough close events. Before finalizing, either close them "
+                "and say 'Subagents: closed', or keep them intentionally and say 'Subagents: retained because ...'."
+            ),
+            acceptance_source=acceptance_source,
+            acceptance=base_acceptance(acceptance_source),
+            extra={"spawn_count": spawn_count, "close_count": close_count},
+        )
+
     if used_subagents and not has_subagent_lifecycle:
         return stop_gate_result(
             payload,
@@ -304,6 +400,25 @@ def main() -> int:
                 "has_subagent_signal": True,
                 "has_verification": has_verification,
             },
+        )
+
+    if (
+        did_work
+        and is_heavy_turn
+        and not used_subagents
+        and acceptance_source == "structured"
+        and not subagent_status_has_reason(acceptance_fields.get("subagent_status", ""))
+    ):
+        return stop_gate_result(
+            payload,
+            reason="heavy_work_not_delegated_without_reason",
+            public_reason=(
+                "Heavy-work turn finished without subagent use, but subagent_status does not explain why. "
+                "If you intentionally stayed local, keep subagent_status=not_used and add a short reason."
+            ),
+            acceptance_source=acceptance_source,
+            acceptance=base_acceptance(acceptance_source),
+            extra={**acceptance_fields, "heavy_turn": True},
         )
 
     if did_work and acceptance_source == "partial":

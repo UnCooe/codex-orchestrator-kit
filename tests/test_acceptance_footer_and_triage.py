@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,17 @@ from triage import classify  # noqa: E402
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+
+
+def _run_stop_hook(payload: dict) -> dict:
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS / "orchestrator_stop.py")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(proc.stdout)
 
 
 class AcceptanceFooterAndTriageTests(unittest.TestCase):
@@ -332,6 +344,87 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             output = build_report(codex_home, since_days=30, report_id="analyze-subagent", max_samples=5, reports_dir=str(reports_root))
 
             self.assertEqual(output["acceptance"].get("work_done_missing_subagent_status", 0), 0)
+
+    def test_stop_blocks_unclosed_subagents_without_retained_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "please implement this feature"}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "function_call", "name": "spawn_agent", "arguments": {"task": "worker"}}, "timestamp": "2026-05-02T00:00:10Z"},
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": (
+                        "implemented feature update.\n"
+                        "verification_status=pass\n"
+                        "review_status=pass\n"
+                        "subagent_status=closed\n"
+                        "risk_status=low"
+                    ),
+                }
+            )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertIn("spawned subagents without enough close events", output["reason"])
+
+    def test_stop_blocks_heavy_turn_not_used_without_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "please implement this feature and add tests"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": (
+                        "implemented feature update.\n"
+                        "verification_status=pass\n"
+                        "review_status=pass\n"
+                        "subagent_status=not_used\n"
+                        "risk_status=low"
+                    ),
+                }
+            )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertIn("does not explain why", output["reason"])
+
+    def test_stop_allows_heavy_turn_not_used_with_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "please implement this feature and add tests"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": (
+                        "implemented feature update.\n"
+                        "verification_status=pass\n"
+                        "review_status=pass\n"
+                        "subagent_status=not_used: narrow single-file fix with deterministic validation, so main thread handled it directly.\n"
+                        "risk_status=low"
+                    ),
+                }
+            )
+
+            self.assertTrue(output.get("continue"))
 
 
 if __name__ == "__main__":
