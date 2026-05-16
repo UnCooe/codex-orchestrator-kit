@@ -268,7 +268,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(closure["lifecycle_delta"], 1)
             self.assertEqual(closure["open_sessions"], 1)
             self.assertEqual(closure["heavy_work_signal_quality"], "no_signal")
-            self.assertEqual(output["visible_summary"]["first_line"], "Subagent 工作流复盘：triage")
+            self.assertEqual(output["visible_summary"]["first_line"], "Subagent 工作流复盘：high")
 
     def test_subagent_workflow_counts_only_heavy_prompt_detected_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

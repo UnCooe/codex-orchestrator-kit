@@ -83,6 +83,16 @@ function ConvertTo-HookPythonCommand {
     return $trimmed
 }
 
+function Write-Utf8NoBom {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Value
+    )
+
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($Path, $Value, $encoding)
+}
+
 function Get-OrchestratorScriptName {
     param([string]$Command)
 
@@ -278,7 +288,7 @@ function Merge-Hooks {
 
     New-Item -ItemType Directory -Path (Split-Path $OutputPath -Parent) -Force | Out-Null
     $json = ConvertTo-Json $outputObj -Depth 20
-    Set-Content -Path $OutputPath -Value $json -Encoding utf8
+    Write-Utf8NoBom -Path $OutputPath -Value ($json + [Environment]::NewLine)
     Write-Host "installed: $OutputPath"
 }
 
@@ -546,7 +556,7 @@ function Merge-ConfigTomlHooks {
     }
 
     New-Item -ItemType Directory -Path (Split-Path $OutputPath -Parent) -Force | Out-Null
-    Set-Content -Path $OutputPath -Value $newText -Encoding utf8
+    Write-Utf8NoBom -Path $OutputPath -Value $newText
     Write-Host "installed: $OutputPath"
 }
 

@@ -305,7 +305,7 @@ def _build_visible_summary(
     closure_signals: Dict[str, object],
     heavy_work: Dict[str, object],
 ) -> Dict[str, str]:
-    first_line = "Subagent 工作流复盘：triage" if action_policy == "triage" else "Subagent 工作流复盘：observe"
+    first_line = "Subagent 工作流复盘：high" if action_policy == "triage" else "Subagent 工作流复盘：none"
     why_it_matters = (
         f"lifecycle_delta={closure_signals.get('lifecycle_delta', 0)}; "
         f"open_sessions={closure_signals.get('open_sessions', 0)}; "

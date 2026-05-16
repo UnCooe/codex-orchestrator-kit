@@ -344,14 +344,14 @@ def _build_visible_summary(
     lifecycle_delta = _safe_get_int(subagents, "lifecycle_delta_spawn_minus_close")
     footer_status = str(footer_adoption.get("status") or "unknown")
     trend_overall = str(trend.get("overall") or "unknown")
-    first_line = "Orchestrator 自动复盘：triage" if (
+    first_line = "Orchestrator 自动复盘：high" if (
         lifecycle_delta > 0 or footer_adoption.get("missing", 0) > 0 or blocked > 0
-    ) else "Orchestrator 自动复盘：observe"
+    ) else "Orchestrator 自动复盘：none"
     why_it_matters = (
         f"footer={footer_status} {footer_adoption.get('complete', 0)}/{footer_adoption.get('work_done_messages', 0)}; "
         f"lifecycle_delta={lifecycle_delta}; blocked_ratio={blocked_ratio}; trend={trend_overall}"
     )
-    next_action = "tighten workflow closure and footer adoption" if first_line.endswith("triage") else "continue observe"
+    next_action = "tighten workflow closure and footer adoption" if first_line.endswith("high") else "continue observe"
     return {
         "first_line": first_line,
         "why_it_matters": why_it_matters,

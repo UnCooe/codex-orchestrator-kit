@@ -84,6 +84,9 @@ ACCEPTANCE_FIELDS = ("verification_status", "review_status", "subagent_status", 
 ACCEPTANCE_FIELD_RE = re.compile(
     r'(?im)(?:^|[,\n;])\s*"?(?P<field>verification_status|review_status|subagent_status|risk_status)"?\s*[:=：]\s*(?P<value>[^,\n;\}\]]+)'
 )
+UNSAFE_GIT_DIRECTIVE_RE = re.compile(
+    r"::\s*git-(?:stage|commit|create-branch|push|create-pr)\{[^}\n]*\}"
+)
 ACCEPTANCE_STATUS_MAP = {
     "verification_status": {"pass", "passed", "verified", "done", "completed", "ok", "yes", "true", "1", "checked", "已完成", "已验证", "已检查", "已核对", "已执行", "完成", "通过"},
     "review_status": {"pass", "passed", "reviewed", "done", "completed", "ok", "yes", "true", "1", "not_required", "n/a", "na", "已检查", "已核对", "完成", "通过"},
@@ -121,7 +124,7 @@ def is_status_positive(field: str, value: str) -> bool:
         return False
     if any(bad in normalized for bad in ("critical", "high", "unacceptable", "open", "unknown", "fail", "blocked")):
         return False
-    head = re.split(r"[\s,，;；。:]+", normalized.replace("：", ":"), maxsplit=1)[0]
+    head = re.split(r"[\s,，;；。:？?]+", normalized.replace("：", ":"), maxsplit=1)[0]
     for token in ACCEPTANCE_STATUS_MAP.get(field, set()):
         if any("\u4e00" <= char <= "\u9fff" for char in token):
             if normalized.startswith(token):
@@ -222,6 +225,12 @@ def stop_gate_result(
     return 0
 
 
+def contains_unsafe_git_directive(message: str) -> bool:
+    if not message:
+        return False
+    return bool(UNSAFE_GIT_DIRECTIVE_RE.search(message))
+
+
 def missing_acceptance_fields(fields: dict[str, str]) -> list[str]:
     return [field for field in ACCEPTANCE_FIELDS if not str(fields.get(field, "")).strip()]
 
@@ -303,7 +312,7 @@ def subagent_status_has_reason(value: str) -> bool:
     normalized = str(value).strip()
     if not normalized:
         return False
-    head = re.split(r"[\s,，;；。:：]+", normalized.lower(), maxsplit=1)[0]
+    head = re.split(r"[\s,，;；。:：？?]+", normalized.lower(), maxsplit=1)[0]
     if head not in {"not_used", "not", "none", "closed", "pass"} and "not used" not in normalized.lower():
         return True
     return has_short_note(normalized)
@@ -324,6 +333,24 @@ def main() -> int:
 
     message = payload.get("last_assistant_message") or ""
     message_lower = str(message).lower()
+    if contains_unsafe_git_directive(message):
+        emit_observability_event(
+            payload,
+            event_name="stop",
+            status="blocked",
+            reason="unsafe_git_directive",
+            extra={"directive_guard": "git_directive_plain_text_required"},
+        )
+        print(json.dumps({
+            "decision": "block",
+            "reason": (
+                "Do not emit ::git-* directives in the final response on this Windows desktop thread; "
+                "they can crash the Codex UI renderer. Replace the directive with plain text that names "
+                "the branch, commit, PR, or worktree."
+            ),
+        }))
+        return 0
+
     used_subagents = transcript_has_subagent_signal(payload.get("transcript_path"))
     spawn_count, close_count = current_turn_subagent_counts(payload.get("transcript_path"))
     is_heavy_turn = current_turn_is_heavy(payload.get("transcript_path"))

@@ -280,10 +280,24 @@ Assert-JsonField -JsonText $stopLowRiskPartial -Predicate {
     $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -like '*partial/not_run/blocked*'
 } -Message 'Stop hook should block partial verification paired with low risk while suppressing UI output.'
 
+$stopUnsafeGitDirective = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented change.\n:: git-commit{branch=\"main\"}"}'
+Assert-JsonField -JsonText $stopUnsafeGitDirective -Predicate {
+    param($value)
+    $value.decision -eq 'block' -and
+    $value.reason -like '*::git-*' -and
+    $value.reason -like '*renderer*'
+} -Message 'Stop hook did not block unsafe git directives.'
+
+$hooksJsonBytes = [System.IO.File]::ReadAllBytes((Join-Path $CodexHome 'hooks.json'))
+if ($hooksJsonBytes.Length -ge 3 -and $hooksJsonBytes[0] -eq 0xEF -and $hooksJsonBytes[1] -eq 0xBB -and $hooksJsonBytes[2] -eq 0xBF) {
+    throw 'Installed hooks.json must be UTF-8 without BOM.'
+}
+
 $transcript = Join-Path $CodexHome 'transcript-subagent.jsonl'
 $transcriptContent = @(
     '{"payload":{"type":"message","role":"user","content":"implement a feature"}}',
-    '{"payload":{"name":"spawn_agent"}}'
+    '{"payload":{"name":"spawn_agent"}}',
+    '{"payload":{"name":"close_agent"}}'
 ) -join "`n"
 [System.IO.File]::WriteAllText($transcript, $transcriptContent, [System.Text.UTF8Encoding]::new($false))
 
@@ -558,8 +572,12 @@ foreach ($field in $requiredFactFields) {
     }
 }
 
-$structuredStopFact = $reportObj.facts | Where-Object { $_.event_type -eq 'orchestrator_stop' -and $_.acceptance.source -eq 'structured' } | Select-Object -First 1
-if (-not $structuredStopFact -or $structuredStopFact.acceptance.verification_status -ne 'pass') {
+$structuredStopFact = $reportObj.facts | Where-Object {
+    $_.event_type -eq 'orchestrator_stop' -and
+    $_.acceptance.source -eq 'structured' -and
+    $_.acceptance.verification_status -eq 'pass'
+} | Select-Object -First 1
+if (-not $structuredStopFact) {
     throw 'Analyzer facts did not preserve structured acceptance fields.'
 }
 if (-not ($reportObj.facts | Where-Object { $_.event_type -eq 'orchestrator_pre_tool_use' -and $_.tool_name -eq 'bash' -and $_.normalized_tool_name -eq 'bash' })) {
