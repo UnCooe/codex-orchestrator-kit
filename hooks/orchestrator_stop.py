@@ -39,18 +39,6 @@ VERIFICATION = [
     "\u672a\u8fd0\u884c",
 ]
 
-SUBAGENT_MARKERS = [
-    '"name":"spawn_agent"',
-    '"name": "spawn_agent"',
-    '"name":"wait_agent"',
-    '"name": "wait_agent"',
-    '"name":"close_agent"',
-    '"name": "close_agent"',
-    '"tool":"spawn_agent"',
-    '"tool": "spawn_agent"',
-    "<subagent_notification",
-]
-
 SUBAGENT_LIFECYCLE = [
     r"\bsubagents:\s*closed\b",
     r"\bsubagents:\s*retained because\b",
@@ -241,19 +229,34 @@ def current_turn_text(transcript_path: str | None) -> str:
     return "\n".join(json.dumps(item, ensure_ascii=False) for item in items)[-120000:].lower()
 
 
+def _turn_payload(item: dict) -> dict:
+    payload = item.get("payload", {}) if isinstance(item, dict) else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _turn_call_name(item: dict) -> str:
+    payload = _turn_payload(item)
+    name = payload.get("name")
+    return str(name).strip() if isinstance(name, str) else ""
+
+
 def transcript_has_subagent_signal(transcript_path: str | None) -> bool:
-    text = current_turn_text(transcript_path)
-    if not text:
-        return False
-    return any(marker in text for marker in SUBAGENT_MARKERS)
+    items = _load_turn_items(transcript_path)
+    for item in items:
+        if _turn_call_name(item) in {"spawn_agent", "wait_agent", "close_agent"}:
+            return True
+    return False
 
 
 def current_turn_subagent_counts(transcript_path: str | None) -> tuple[int, int]:
-    text = current_turn_text(transcript_path)
-    if not text:
-        return 0, 0
-    spawn_count = len(re.findall(r'"name"\s*:\s*"spawn_agent"|<subagent_notification', text))
-    close_count = len(re.findall(r'"name"\s*:\s*"close_agent"', text))
+    spawn_count = 0
+    close_count = 0
+    for item in _load_turn_items(transcript_path):
+        call_name = _turn_call_name(item)
+        if call_name == "spawn_agent":
+            spawn_count += 1
+        elif call_name == "close_agent":
+            close_count += 1
     return spawn_count, close_count
 
 def main() -> int:

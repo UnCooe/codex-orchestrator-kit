@@ -437,6 +437,41 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
             self.assertTrue(output.get("continue"))
 
+    def test_stop_ignores_subagent_marker_strings_inside_tool_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "explain this hook behavior"}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "name": "exec_command",
+                            "output": 'source snippet: "<subagent_notification" and "\\"name\\": \\"spawn_agent\\""',
+                        },
+                        "timestamp": "2026-05-02T00:00:10Z",
+                    },
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": (
+                        "explained the hook behavior.\n"
+                        "verification_status=pass\n"
+                        "review_status=not_required\n"
+                        "subagent_status=not_used\n"
+                        "risk_status=low"
+                    ),
+                }
+            )
+
+            self.assertTrue(output.get("continue"))
+
     def test_pre_tool_soft_policy_warns_for_broad_scan_without_research_capability(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir) / "repo"
