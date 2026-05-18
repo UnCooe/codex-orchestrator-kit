@@ -5,6 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJECT_PATH=""
 PROJECT_ID=""
 REVIEWERS="subagent-workflow"
+PRETOOL_POLICY="soft"
 FORCE=0
 
 while [[ $# -gt 0 ]]; do
@@ -21,13 +22,17 @@ while [[ $# -gt 0 ]]; do
       REVIEWERS="$2"
       shift 2
       ;;
+    --pretool-policy)
+      PRETOOL_POLICY="$2"
+      shift 2
+      ;;
     --force)
       FORCE=1
       shift
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: register-project.sh --project PATH [--project-id ID] [--reviewers a,b] [--force]" >&2
+      echo "Usage: register-project.sh --project PATH [--project-id ID] [--reviewers a,b] [--pretool-policy soft|hard] [--force]" >&2
       exit 2
       ;;
   esac
@@ -62,20 +67,23 @@ if ! command -v "$python_bin" >/dev/null 2>&1; then
   python_bin=python
 fi
 
-"$python_bin" - "$SCRIPT_DIR/templates/review-profile.toml" "$PROFILE_PATH" "$PROJECT_ID" "$REVIEWERS" <<'PY'
+"$python_bin" - "$SCRIPT_DIR/templates/review-profile.toml" "$PROFILE_PATH" "$PROJECT_ID" "$REVIEWERS" "$PRETOOL_POLICY" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-template_path, output_path, project_id, reviewers_csv = sys.argv[1:5]
+template_path, output_path, project_id, reviewers_csv, pretool_policy = sys.argv[1:6]
 reviewers = [item.strip() for item in reviewers_csv.split(",") if item.strip()]
 if not reviewers:
     raise SystemExit("At least one reviewer must be specified.")
+if pretool_policy not in {"soft", "hard"}:
+    raise SystemExit("pretool policy must be soft or hard.")
 
 text = Path(template_path).read_text(encoding="utf-8")
 text = re.sub(r'project_id\s*=\s*"[^"]*"', f'project_id = "{project_id.replace(chr(34), chr(92) + chr(34))}"', text)
 reviewer_lines = "\n".join(f'  "{reviewer.replace(chr(34), chr(92) + chr(34))}",' for reviewer in reviewers)
 text = re.sub(r"(?s)enabled_reviewers\s*=\s*\[.*?\]", f"enabled_reviewers = [\n{reviewer_lines}\n]", text)
+text = re.sub(r'pretool_policy\s*=\s*"[^"]*"', f'pretool_policy = "{pretool_policy}"', text)
 Path(output_path).write_text(text, encoding="utf-8")
 PY
 

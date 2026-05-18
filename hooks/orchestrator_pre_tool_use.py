@@ -10,6 +10,7 @@ from orchestrator_observability import (
     normalize_tool_name,
     text_length,
 )
+from workflow_profile import current_turn_capabilities, workflow_options
 
 
 DELEGATION_MARKERS = [
@@ -44,6 +45,14 @@ def has_delegation_signal(transcript_path: str | None) -> bool:
     return any(marker in text for marker in DELEGATION_MARKERS)
 
 
+def required_capabilities(tool_name: str, tool_family: str, text: str) -> set[str]:
+    if tool_family == "shell_like" and is_broad_scan(text):
+        return {"research"}
+    if tool_name in {"apply_patch", "edit", "write"}:
+        return {"implementation"}
+    return set()
+
+
 def block(reason: str) -> int:
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0
@@ -75,71 +84,112 @@ def main() -> int:
     tool_input = payload.get("tool_input", {})
     text = all_text(tool_input)
     input_length = text_length(tool_input)
+    options = workflow_options(payload)
+    pretool_policy = options.get("pretool_policy", "soft")
+    delegation_signal = has_delegation_signal(payload.get("transcript_path"))
+    capability_signal = current_turn_capabilities(payload)
+    needed_capabilities = required_capabilities(tool_name, tool_family, text)
+    missing_capabilities = needed_capabilities - capability_signal
 
-    if has_delegation_signal(payload.get("transcript_path")):
+    if delegation_signal or not missing_capabilities:
         emit_observability_event(
             payload,
             event_name="pre_tool_use",
             status="allow",
-            reason="delegation_signal_detected",
+            reason="workflow_signal_detected" if delegation_signal else "capability_signal_detected",
             text_source=text,
             tool_name=tool_name,
             tool_family=tool_family,
             normalized_tool_name=tool_name,
             input_length=input_length,
+            extra={
+                "needed_capabilities": sorted(needed_capabilities),
+                "current_turn_capabilities": sorted(capability_signal),
+                "pretool_policy": pretool_policy,
+            },
         )
         return 0
 
     if tool_family == "shell_like" and is_broad_scan(text):
-        block(
-            "Broad repo scanning is noisy work. First make an orchestrator delegation decision "
-            "and prefer a researcher subagent for repo mapping. If this is a tiny direct task, "
-            "state the exception and retry with a narrower command."
-        )
+        if pretool_policy == "hard":
+            block(
+                "Broad repo scanning is noisy work. First make an orchestrator delegation decision "
+                "and prefer a researcher subagent for repo mapping. If this is a tiny direct task, "
+                "state the exception and retry with a narrower command."
+            )
+            status = "blocked"
+        else:
+            status = "warn"
         emit_observability_event(
             payload,
             event_name="pre_tool_use",
-            status="blocked",
-            reason="broad_scan_detected",
+            status=status,
+            reason="broad_scan_without_research_capability",
             tool_family=tool_family,
             normalized_tool_name=tool_name,
             input_length=input_length,
             tool_name=tool_name,
             text_source=text,
+            extra={
+                "needed_capabilities": sorted(needed_capabilities),
+                "current_turn_capabilities": sorted(capability_signal),
+                "pretool_policy": pretool_policy,
+            },
         )
+        if status == "blocked":
+            return 0
         return 0
 
     if tool_name in {"apply_patch", "edit", "write"}:
         files = patch_file_count(text)
         large_patch = len(text) > 12000 or text.count("\n") > 220
         if files > 1 or large_patch:
-            block(
-                "This looks like a multi-file or large code edit without a prior delegation signal. "
-                "Split the work first: assign implementation ownership, independent test design, "
-                "and review/critique, or state why this edit is a small exception."
-            )
+            if pretool_policy == "hard":
+                block(
+                    "This looks like a multi-file or large code edit without a prior workflow signal. "
+                    "Split ownership first, or set this project to a softer pretool policy if the main "
+                    "thread intentionally handles bounded implementation."
+                )
+                status = "blocked"
+            else:
+                status = "warn"
             emit_observability_event(
                 payload,
                 event_name="pre_tool_use",
-                status="blocked",
-                reason="large_patch_detected",
+                status=status,
+                reason="large_patch_without_implementation_capability",
                 tool_family=tool_family,
                 normalized_tool_name=tool_name,
                 input_length=input_length,
                 tool_name=tool_name,
                 text_source=text,
+                extra={
+                    "files": files,
+                    "large_patch": large_patch,
+                    "needed_capabilities": sorted(needed_capabilities),
+                    "current_turn_capabilities": sorted(capability_signal),
+                    "pretool_policy": pretool_policy,
+                },
             )
+            if status == "blocked":
+                return 0
             return 0
 
     emit_observability_event(
         payload,
         event_name="pre_tool_use",
         status="allow",
+        reason="soft_allow_without_capability_signal",
         tool_name=tool_name,
         tool_family=tool_family,
         normalized_tool_name=tool_name,
         input_length=input_length,
         text_source=text,
+        extra={
+            "needed_capabilities": sorted(needed_capabilities),
+            "current_turn_capabilities": sorted(capability_signal),
+            "pretool_policy": pretool_policy,
+        },
     )
     return 0
 

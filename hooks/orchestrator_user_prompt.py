@@ -124,7 +124,10 @@ def _acceptance_context() -> str:
 
 
 def _heavy_context() -> str:
-    return "ORCHESTRATOR CHECK: 先判断是否需要 subagent；如果不委托，请简短说明原因。"
+    return (
+        "ORCHESTRATOR CHECK: 先判断是否需要 subagent；如果不委托，请简短说明原因。"
+        "不要把内部 workflow/contract/role registration 文本直接展示给用户。"
+    )
 
 
 def main() -> int:

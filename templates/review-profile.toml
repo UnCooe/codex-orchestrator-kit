@@ -30,3 +30,20 @@ protected_scopes = [
   "secrets",
   "production-config",
 ]
+
+# Workflow governance is capability-based by default. Keep pretool policy soft
+# unless this project really wants process-stage hard blocks.
+[workflow_profile]
+pretool_policy = "soft"
+hide_internal_workflow_text = true
+
+[role_capabilities]
+"implementer" = "implementation"
+"worker" = "implementation"
+"reviewer" = "review"
+"critic" = "review"
+"test_designer" = "test_design"
+"test-writer" = "test_design"
+"test-runner" = "test_execution"
+"researcher" = "research"
+"explorer" = "research"

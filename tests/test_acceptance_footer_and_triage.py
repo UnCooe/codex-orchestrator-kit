@@ -17,6 +17,7 @@ sys.path.insert(0, str(HOOKS))
 
 from analyze import build_report  # noqa: E402
 from orchestrator_observability import _detect_session_id  # noqa: E402
+from workflow_profile import infer_capability  # noqa: E402
 from session_facts import extract_facts  # noqa: E402
 from subagent_workflow import build_report as build_subagent_workflow_report  # noqa: E402
 from triage import classify  # noqa: E402
@@ -36,6 +37,17 @@ def _run_stop_hook(payload: dict) -> dict:
         check=True,
     )
     return json.loads(proc.stdout)
+
+
+def _run_pre_tool_hook(payload: dict) -> str:
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS / "orchestrator_pre_tool_use.py")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return proc.stdout.strip()
 
 
 class AcceptanceFooterAndTriageTests(unittest.TestCase):
@@ -373,7 +385,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(output["decision"], "block")
             self.assertIn("spawned subagents without enough close events", output["reason"])
 
-    def test_stop_blocks_heavy_turn_not_used_without_reason(self) -> None:
+    def test_stop_allows_heavy_turn_not_used_without_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_home = Path(temp_dir) / ".codex"
             transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
@@ -397,8 +409,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 }
             )
 
-            self.assertEqual(output["decision"], "block")
-            self.assertIn("does not explain why", output["reason"])
+            self.assertTrue(output.get("continue"))
 
     def test_stop_allows_heavy_turn_not_used_with_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -425,6 +436,81 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertTrue(output.get("continue"))
+
+    def test_pre_tool_soft_policy_warns_for_broad_scan_without_research_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            (repo / ".codex").mkdir(parents=True, exist_ok=True)
+            (repo / ".codex" / "review-profile.toml").write_text(
+                'project_id = "demo"\n[workflow_profile]\npretool_policy = "soft"\n',
+                encoding="utf-8",
+            )
+            transcript = repo / ".codex" / "sessions" / "2026" / "05" / "02" / "pre.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "please inspect the repo"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = _run_pre_tool_hook(
+                {
+                    "cwd": str(repo),
+                    "transcript_path": str(transcript),
+                    "tool_name": "bash",
+                    "tool_input": {"cmd": "rg --files ."},
+                }
+            )
+
+            self.assertEqual(output, "")
+
+    def test_pre_tool_hard_policy_blocks_for_broad_scan_without_research_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            (repo / ".codex").mkdir(parents=True, exist_ok=True)
+            (repo / ".codex" / "review-profile.toml").write_text(
+                'project_id = "demo"\n[workflow_profile]\npretool_policy = "hard"\n',
+                encoding="utf-8",
+            )
+            transcript = repo / ".codex" / "sessions" / "2026" / "05" / "02" / "pre.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "please inspect the repo"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = json.loads(
+                _run_pre_tool_hook(
+                    {
+                        "cwd": str(repo),
+                        "transcript_path": str(transcript),
+                        "tool_name": "bash",
+                        "tool_input": {"cmd": "rg --files ."},
+                    }
+                )
+            )
+
+            self.assertEqual(output["decision"], "block")
+
+    def test_workflow_profile_maps_project_specific_roles_to_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            (repo / ".codex").mkdir(parents=True, exist_ok=True)
+            (repo / ".codex" / "review-profile.toml").write_text(
+                (
+                    'project_id = "demo"\n'
+                    "[role_capabilities]\n"
+                    '"aiserver-implementer" = "implementation"\n'
+                    '"aiserver-reviewer" = "review"\n'
+                    '"aiserver-test-writer" = "test_design"\n'
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(infer_capability("aiserver-implementer", {"cwd": str(repo)}), "implementation")
+            self.assertEqual(infer_capability("aiserver-reviewer", {"cwd": str(repo)}), "review")
+            self.assertEqual(infer_capability("aiserver-test-writer", {"cwd": str(repo)}), "test_design")
 
 
 if __name__ == "__main__":
