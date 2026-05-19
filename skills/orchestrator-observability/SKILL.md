@@ -13,7 +13,7 @@ Use `docs/workflow-review-kit.md` to keep the boundary clear: this kit provides 
 1. Run the analyzer with a concrete Codex home and time window.
 2. Run triage on the generated JSON report when deciding whether the user should be interrupted.
 3. Run the subagent workflow report when validating heavy-work delegation behavior.
-4. Read `docs/reviewers/subagent-workflow-rubric.md` before deciding whether a subagent signal is good, watch-level, bad, or an allowed exception.
+4. Read `docs/reviewers/subagent-workflow-rubric.md` before deciding whether a subagent signal is good, watch-level, bad, or an allowed exception. If the packaged skill directory does not include `docs/`, open the source-repo copy under `codex-orchestrator-kit/docs/reviewers/subagent-workflow-rubric.md`.
 5. Read the generated Markdown summary first.
 6. Use the JSON report only for exact counts or automation outputs.
 7. Recommend changes as a patch list; do not directly change live workflow files unless the user asks.

@@ -50,11 +50,14 @@ function Read-JsonlLast {
 
 function Assert-JsonField {
     param(
-        [Parameter(Mandatory)]$JsonText,
+        $JsonText,
         [Parameter(Mandatory)][scriptblock]$Predicate,
         [Parameter(Mandatory)][string]$Message
     )
 
+    if ($null -eq $JsonText -or [string]::IsNullOrWhiteSpace([string]$JsonText)) {
+        throw "$Message [hook output was empty]"
+    }
     $parsed = $JsonText | ConvertFrom-Json
     if (-not (& $Predicate $parsed)) {
         throw $Message
@@ -200,40 +203,47 @@ $postTool = Join-Path $CodexHome 'hooks\orchestrator_post_tool_use.py'
 $stopHook = Join-Path $CodexHome 'hooks\orchestrator_stop.py'
 
 $heavyPromptOutput = Invoke-PythonHook -Script $userPrompt -InputJson '{"prompt":"please implement this feature and add tests"}'
-Assert-JsonField -JsonText $heavyPromptOutput -Predicate {
-    param($value)
-    $context = $value.hookSpecificOutput.additionalContext
-    $value.hookSpecificOutput.hookEventName -eq 'UserPromptSubmit' -and
-    $context -like '*ORCHESTRATOR CHECK*' -and
-    $context -like '*verification_status*' -and
-    $context -like '*Subagents: closed*'
-} -Message 'UserPromptSubmit heavy prompt did not inject orchestrator context.'
+if (-not [string]::IsNullOrWhiteSpace($heavyPromptOutput)) {
+    throw 'UserPromptSubmit heavy prompt should stay silent by default.'
+}
 
 $benignPromptOutput = Invoke-PythonHook -Script $userPrompt -InputJson '{"prompt":"what is 2+2?"}'
-Assert-JsonField -JsonText $benignPromptOutput -Predicate {
-    param($value)
-    $context = $value.hookSpecificOutput.additionalContext
-    $context -like '*verification_status*' -and
-    $context -notlike '*ORCHESTRATOR CHECK*'
-} -Message 'UserPromptSubmit benign prompt should emit only acceptance context.'
+if (-not [string]::IsNullOrWhiteSpace($benignPromptOutput)) {
+    throw 'UserPromptSubmit benign prompt should stay silent by default.'
+}
 
-$preBlockOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"bash","tool_input":{"command":"rg --files"}}'
-Assert-JsonField -JsonText $preBlockOutput -Predicate {
+$preSoftOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"bash","tool_input":{"command":"rg --files"}}'
+if (-not [string]::IsNullOrWhiteSpace($preSoftOutput)) {
+    throw 'PreToolUse broad scan should not hard-block under the default soft workflow policy.'
+}
+
+$hardPolicyRepo = Join-Path $env:TEMP ('pretool-hard-policy-' + [Guid]::NewGuid().ToString('N'))
+$hardPolicyCodex = Join-Path $hardPolicyRepo '.codex'
+New-Item -ItemType Directory -Path $hardPolicyCodex -Force | Out-Null
+$hardPolicyProfile = @'
+project_id = "pretool-hard"
+[workflow_profile]
+pretool_policy = "hard"
+'@
+[System.IO.File]::WriteAllText((Join-Path $hardPolicyCodex 'review-profile.toml'), $hardPolicyProfile, [System.Text.UTF8Encoding]::new($false))
+
+$hardPolicyTranscript = Join-Path $hardPolicyCodex 'sessions\2026\05\02\pre.jsonl'
+New-Item -ItemType Directory -Path (Split-Path -Parent $hardPolicyTranscript) -Force | Out-Null
+$hardPolicyTranscriptContent = @'
+{"payload":{"type":"message","role":"user","content":"please inspect the repo"}}
+'@
+[System.IO.File]::WriteAllText($hardPolicyTranscript, $hardPolicyTranscriptContent, [System.Text.UTF8Encoding]::new($false))
+
+$preHardBlockOutput = Invoke-PythonHook -Script $preTool -InputJson (@{
+    cwd = $hardPolicyRepo
+    transcript_path = $hardPolicyTranscript
+    tool_name = 'bash'
+    tool_input = @{ command = 'rg --files' }
+} | ConvertTo-Json -Compress -Depth 10)
+Assert-JsonField -JsonText $preHardBlockOutput -Predicate {
     param($value)
     $value.decision -eq 'block'
-} -Message 'PreToolUse broad scan did not block.'
-
-$preShellCommandBlockOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"shell_command","tool_input":{"command":"Get-ChildItem -Recurse"}}'
-Assert-JsonField -JsonText $preShellCommandBlockOutput -Predicate {
-    param($value)
-    $value.decision -eq 'block'
-} -Message 'PreToolUse shell_command broad scan did not block.'
-
-$prePowerShellBlockOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"powershell","tool_input":{"command":"Select-String -Path . -Recurse -Pattern TODO"}}'
-Assert-JsonField -JsonText $prePowerShellBlockOutput -Predicate {
-    param($value)
-    $value.decision -eq 'block'
-} -Message 'PreToolUse PowerShell broad scan did not block.'
+} -Message 'PreToolUse broad scan did not block under hard workflow policy.'
 
 $largeResponse = 'x' * 60001
 $postBlockPayload = @{ tool_name = 'bash'; tool_response = $largeResponse } | ConvertTo-Json -Compress
@@ -265,7 +275,7 @@ Assert-JsonField -JsonText $stopMissingVerification -Predicate {
 $stopPartialFooter = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=pass\nreview_status=pass"}'
 Assert-JsonField -JsonText $stopPartialFooter -Predicate {
     param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -like '*Acceptance footer is incomplete*'
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Acceptance footer is incomplete.'
 } -Message 'Stop hook did not block partial acceptance footer while suppressing UI output.'
 
 $stopPartialVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=medium；live client validation remains."}'
@@ -277,7 +287,7 @@ Assert-JsonField -JsonText $stopPartialVerification -Predicate {
 $stopLowRiskPartial = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}'
 Assert-JsonField -JsonText $stopLowRiskPartial -Predicate {
     param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -like '*partial/not_run/blocked*'
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Verification and risk status are inconsistent.'
 } -Message 'Stop hook should block partial verification paired with low risk while suppressing UI output.'
 
 $stopUnsafeGitDirective = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented change.\n:: git-commit{branch=\"main\"}"}'
@@ -305,7 +315,7 @@ $stopLifecyclePayload = @{ transcript_path = $transcript; last_assistant_message
 $stopLifecycleOutput = Invoke-PythonHook -Script $stopHook -InputJson $stopLifecyclePayload
 Assert-JsonField -JsonText $stopLifecycleOutput -Predicate {
     param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Subagent lifecycle is incomplete.'
 } -Message 'Stop hook should block missing subagent lifecycle while suppressing UI output.'
 
 $stopPassPayload = @{
@@ -609,7 +619,13 @@ if (-not (Test-Path $subagentWorkflowJsonReport) -or -not (Test-Path $subagentWo
     throw 'Subagent workflow report files were not written.'
 }
 $subagentWorkflowObj = Get-Content -Raw -Encoding UTF8 $subagentWorkflowJsonReport | ConvertFrom-Json
-if ($subagentWorkflowObj.report_type -ne 'subagent_workflow' -or $subagentWorkflowObj.workflow_signals.broad_scan_blocks -lt 1) {
+if (
+    $subagentWorkflowObj.report_type -ne 'subagent_workflow' -or
+    (
+        $subagentWorkflowObj.workflow_signals.broad_scan_blocks -lt 1 -and
+        $subagentWorkflowObj.workflow_signals.broad_scan_bypasses -lt 1
+    )
+) {
     throw 'Subagent workflow report missing expected workflow signals.'
 }
 $rawSubagentWorkflowText = Get-Content -Raw -Encoding UTF8 $subagentWorkflowJsonReport
@@ -680,12 +696,9 @@ $suppressedReminderOutput = Invoke-PythonHook -Script $userPrompt -InputJson (@{
     prompt = 'hello again'
     cwd = 'C:\safe\project'
 } | ConvertTo-Json -Compress)
-Assert-JsonField -JsonText $suppressedReminderOutput -Predicate {
-    param($value)
-    $context = $value.hookSpecificOutput.additionalContext
-    $context -like '*verification_status*' -and
-    $context -notlike '*ORCHESTRATOR HIGH-RISK ALERT*'
-} -Message 'UserPromptSubmit should suppress repeated high-risk reminder but keep acceptance context.'
+if (-not [string]::IsNullOrWhiteSpace($suppressedReminderOutput)) {
+    throw 'UserPromptSubmit should suppress repeated high-risk reminder without routine context.'
+}
 
 $alertState = Get-Content -Raw -Encoding UTF8 $currentAlert | ConvertFrom-Json
 $alertState.last_reminded_at = '2000-01-01T00:00:00Z'
@@ -695,8 +708,8 @@ Assert-JsonField -JsonText $combinedReminderOutput -Predicate {
     param($value)
     $context = $value.hookSpecificOutput.additionalContext
     $context -like '*ORCHESTRATOR HIGH-RISK ALERT*' -and
-    $context -like '*ORCHESTRATOR CHECK*'
-} -Message 'UserPromptSubmit did not combine high-risk reminder with heavy prompt context.'
+    $context -notlike '*ORCHESTRATOR CHECK*'
+} -Message 'UserPromptSubmit should emit only the short high-risk reminder.'
 
 $lowReportPath = Join-Path $triageReportDir 'orchestrator-observability-low-smoke.json'
 $lowReport = @{

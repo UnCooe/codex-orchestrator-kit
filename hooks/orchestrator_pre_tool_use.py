@@ -90,13 +90,14 @@ def main() -> int:
     capability_signal = current_turn_capabilities(payload)
     needed_capabilities = required_capabilities(tool_name, tool_family, text)
     missing_capabilities = needed_capabilities - capability_signal
+    broad_scan = tool_family == "shell_like" and is_broad_scan(text)
 
-    if delegation_signal or not missing_capabilities:
+    if broad_scan and delegation_signal:
         emit_observability_event(
             payload,
             event_name="pre_tool_use",
             status="allow",
-            reason="workflow_signal_detected" if delegation_signal else "capability_signal_detected",
+            reason="broad_scan_with_workflow_signal",
             text_source=text,
             tool_name=tool_name,
             tool_family=tool_family,
@@ -110,7 +111,25 @@ def main() -> int:
         )
         return 0
 
-    if tool_family == "shell_like" and is_broad_scan(text):
+    if broad_scan:
+        if not missing_capabilities:
+            emit_observability_event(
+                payload,
+                event_name="pre_tool_use",
+                status="allow",
+                reason="broad_scan_with_research_capability",
+                text_source=text,
+                tool_name=tool_name,
+                tool_family=tool_family,
+                normalized_tool_name=tool_name,
+                input_length=input_length,
+                extra={
+                    "needed_capabilities": sorted(needed_capabilities),
+                    "current_turn_capabilities": sorted(capability_signal),
+                    "pretool_policy": pretool_policy,
+                },
+            )
+            return 0
         if pretool_policy == "hard":
             block(
                 "Broad repo scanning is noisy work. First make an orchestrator delegation decision "
@@ -138,6 +157,25 @@ def main() -> int:
         )
         if status == "blocked":
             return 0
+        return 0
+
+    if delegation_signal or not missing_capabilities:
+        emit_observability_event(
+            payload,
+            event_name="pre_tool_use",
+            status="allow",
+            reason="workflow_signal_detected" if delegation_signal else "capability_signal_detected",
+            text_source=text,
+            tool_name=tool_name,
+            tool_family=tool_family,
+            normalized_tool_name=tool_name,
+            input_length=input_length,
+            extra={
+                "needed_capabilities": sorted(needed_capabilities),
+                "current_turn_capabilities": sorted(capability_signal),
+                "pretool_policy": pretool_policy,
+            },
+        )
         return 0
 
     if tool_name in {"apply_patch", "edit", "write"}:

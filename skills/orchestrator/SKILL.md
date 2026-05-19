@@ -77,6 +77,10 @@ Ask subagents to return only:
 - changed files, when they edited files
 
 Do not paste raw logs, full file dumps, or long reasoning into the main thread. Summarize and cite only the evidence needed for the decision.
+Internal workflow contracts are for hooks and observability, not for the user-visible reply.
+Do not paste `WORK_CONTRACT_BEGIN/END`, role-registration text, or similar control blocks into the visible response.
+If the user needs to understand the execution path, compress it into one short sentence such as:
+`执行模式：targeted_refactor；范围限于 hooks/tests；本轮未委托，因为当前运行时不适合默认委托。`
 
 ## Acceptance Gate
 
@@ -94,3 +98,6 @@ Before final response:
   - `risk_status`
   Example:
   `verification_status=pass; review_status=pass; subagent_status=closed; risk_status=low`
+
+Treat the footer requirement as a static contract, not as something a hook will remind you about later.
+Assume `UserPromptSubmit` is silent by default and only emits a short high-risk reminder when the workflow is already in an alert state.

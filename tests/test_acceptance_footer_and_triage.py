@@ -50,7 +50,26 @@ def _run_pre_tool_hook(payload: dict) -> str:
     return proc.stdout.strip()
 
 
+def _run_user_prompt_hook(payload: dict) -> dict:
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS / "orchestrator_user_prompt.py")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(proc.stdout) if proc.stdout.strip() else {}
+
+
 class AcceptanceFooterAndTriageTests(unittest.TestCase):
+    def test_user_prompt_heavy_prompt_is_silent_by_default(self) -> None:
+        output = _run_user_prompt_hook({"prompt": "please implement this feature and add tests"})
+        self.assertEqual(output, {})
+
+    def test_user_prompt_benign_prompt_is_silent_by_default(self) -> None:
+        output = _run_user_prompt_hook({"prompt": "what is 2+2?"})
+        self.assertEqual(output, {})
+
     def test_detect_session_id_normalizes_rollout_filename(self) -> None:
         session_id = _detect_session_id(
             "/tmp/.codex/sessions/2026/05/15/rollout-2026-05-15T20-13-49-019e2668-493a-73c1-ba3c-391cbc8664bc.jsonl"
@@ -281,6 +300,8 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(closure["open_sessions"], 1)
             self.assertEqual(closure["heavy_work_signal_quality"], "no_signal")
             self.assertEqual(output["visible_summary"]["first_line"], "Subagent 工作流复盘：high")
+            self.assertEqual(output["workflow_policy"], "triage")
+            self.assertEqual(output["acceptance_policy"], "observe")
 
     def test_subagent_workflow_counts_only_heavy_prompt_detected_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -333,6 +354,130 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(heavy["signal_sessions"], 1)
             self.assertEqual(heavy["signal_sessions_with_spawn"], 1)
 
+    def test_subagent_workflow_marks_insufficient_sample_when_no_work_done_or_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "workflow.jsonl"
+            events = codex_home / "orchestrator-observability" / "events" / "2026-05-02.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"type": "session_meta", "payload": {"id": "sess-1", "cwd": "/repo/one"}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"type": "session_meta", "payload": {"id": "sess-2", "cwd": "/repo/two"}, "timestamp": "2026-05-02T00:00:10Z"},
+                ],
+            )
+            _write_jsonl(
+                events,
+                [
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "user_prompt",
+                        "status": "warn",
+                        "reason": "heavy_prompt_detected",
+                        "session_id": "sess-1",
+                        "created_at": "2026-05-02T00:00:45Z",
+                        "cwd": "/repo/one",
+                    }
+                ],
+            )
+
+            output = build_subagent_workflow_report(
+                codex_home,
+                since_days=30,
+                report_id="workflow-insufficient",
+                reports_dir=str(reports_root),
+                max_samples=5,
+            )
+
+            self.assertEqual(output["classification"], "insufficient_sample")
+            self.assertEqual(output["sample_assessment"]["status"], "insufficient")
+            self.assertEqual(output["visible_summary"]["first_line"], "Subagent 工作流复盘：insufficient-sample")
+
+    def test_subagent_workflow_ignores_incompatible_baseline_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            previous = {
+                "generated_at": "2026-05-01T00:00:00Z",
+                "report_name": "subagent-workflow-prev.json",
+                "report_type": "subagent_workflow",
+                "since_days": 7,
+                "paths_included": False,
+                "subagents": {"lifecycle_delta_spawn_minus_close": 10, "open_sessions": 2},
+                "workflow_signals": {
+                    "broad_scan_bypasses": 3,
+                    "heavy_work_delegation": {"signal_sessions_without_spawn": 2, "session_coverage_rate": 0.2},
+                },
+            }
+            (reports_root / "subagent-workflow-prev.json").write_text(json.dumps(previous), encoding="utf-8")
+
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "workflow.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {
+                        "timestamp": "2026-05-02T00:00:00Z",
+                        "session_id": "sess-1",
+                        "payload": {"type": "message", "role": "assistant", "content": "implemented a fix.\nverification_status=pass\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"},
+                    }
+                ],
+            )
+
+            output = build_subagent_workflow_report(
+                codex_home,
+                since_days=30,
+                report_id="workflow-baseline",
+                reports_dir=str(reports_root),
+                max_samples=5,
+            )
+
+            self.assertEqual(output["trend"]["overall"], "incomparable")
+            self.assertFalse(output["trend"]["baseline_compatible"])
+
+    def test_subagent_workflow_counts_current_broad_scan_reason_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            events = codex_home / "orchestrator-observability" / "events" / "2026-05-02.jsonl"
+            _write_jsonl(
+                events,
+                [
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "pre_tool_use",
+                        "status": "blocked",
+                        "reason": "broad_scan_without_research_capability",
+                        "tool_family": "shell_like",
+                        "created_at": "2026-05-02T00:00:10Z",
+                        "cwd": "/repo/one",
+                    },
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "pre_tool_use",
+                        "status": "allow",
+                        "reason": "broad_scan_with_workflow_signal",
+                        "tool_family": "shell_like",
+                        "created_at": "2026-05-02T00:00:20Z",
+                        "cwd": "/repo/one",
+                    },
+                ],
+            )
+
+            output = build_subagent_workflow_report(
+                codex_home,
+                since_days=30,
+                report_id="workflow-broad-scan",
+                reports_dir=str(reports_root),
+                max_samples=5,
+            )
+
+            self.assertEqual(output["workflow_signals"]["broad_scan_blocks"], 1)
+            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 1)
+
     def test_analyze_requires_subagent_status_only_when_signal_present(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_home = Path(temp_dir) / ".codex"
@@ -383,7 +528,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertEqual(output["decision"], "block")
-            self.assertIn("spawned subagents without enough close events", output["reason"])
+            self.assertEqual(output["reason"], "Subagent lifecycle is incomplete.")
 
     def test_stop_allows_heavy_turn_not_used_without_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

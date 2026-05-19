@@ -327,12 +327,7 @@ def main() -> int:
                 return stop_gate_result(
                     payload,
                     reason="acceptance_footer_subagent_status_reject",
-                    public_reason=(
-                        "Structured acceptance footer indicates subagent_status is not closed/retained. "
-                        "Before finalizing, include a complete acceptance footer with verification_status, "
-                        "review_status, subagent_status, and risk_status, and state the lifecycle outcome: "
-                        "'Subagents: closed' or 'Subagents: retained because ...'."
-                    ),
+                    public_reason="Subagent lifecycle is incomplete.",
                     acceptance_source=acceptance_source,
                     acceptance=base_acceptance(acceptance_source),
                     extra={**acceptance_fields},
@@ -344,10 +339,7 @@ def main() -> int:
         return stop_gate_result(
             payload,
             reason="subagent_close_missing",
-            public_reason=(
-                "Current turn spawned subagents without enough close events. Before finalizing, either close them "
-                "and say 'Subagents: closed', or keep them intentionally and say 'Subagents: retained because ...'."
-            ),
+            public_reason="Subagent lifecycle is incomplete.",
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
             extra={"spawn_count": spawn_count, "close_count": close_count},
@@ -357,11 +349,7 @@ def main() -> int:
         return stop_gate_result(
             payload,
             reason="subagent_lifecycle_missing",
-            public_reason=(
-                "Subagent usage was detected. Before finalizing, add a complete acceptance footer "
-                "(verification_status, review_status, subagent_status, risk_status) and state the lifecycle "
-                "outcome: 'Subagents: closed' or 'Subagents: retained because ...'."
-            ),
+            public_reason="Subagent lifecycle is incomplete.",
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
             extra={
@@ -374,11 +362,7 @@ def main() -> int:
         return stop_gate_result(
             payload,
             reason="acceptance_footer_incomplete",
-            public_reason=(
-                "Acceptance footer is incomplete. Add these fields before finalizing: "
-                + ", ".join(footer_missing)
-                + "."
-            ),
+            public_reason="Acceptance footer is incomplete.",
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
             extra={
@@ -391,11 +375,7 @@ def main() -> int:
         return stop_gate_result(
             payload,
             reason="acceptance_footer_missing",
-            public_reason=(
-                "Work completion was detected without the required acceptance footer. "
-                "Before finalizing, add verification_status, review_status, subagent_status, "
-                "and risk_status, plus short notes for tests/checks run or why not run."
-            ),
+            public_reason="Acceptance footer is incomplete.",
             acceptance_source="missing",
             acceptance=base_acceptance("missing"),
             extra={
@@ -433,10 +413,7 @@ def main() -> int:
             return stop_gate_result(
                 payload,
                 reason="acceptance_footer_verification_fail",
-                public_reason=(
-                    "verification_status is not acceptable. Use pass only for complete verification. "
-                    "For partial/not_run/blocked verification, keep that status but add a short note and a non-low risk_status."
-                ),
+                public_reason="Verification and risk status are inconsistent.",
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields, "has_verification": False},
@@ -446,7 +423,7 @@ def main() -> int:
             return stop_gate_result(
                 payload,
                 reason="acceptance_footer_review_fail",
-                public_reason="Structured acceptance footer indicates review is incomplete. Add review_status=pass or an explicit exception.",
+                public_reason="Review status is incomplete.",
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields, "has_review": False},
@@ -456,7 +433,7 @@ def main() -> int:
             return stop_gate_result(
                 payload,
                 reason="acceptance_footer_subagent_status_reject",
-                public_reason="Structured acceptance footer indicates subagent_status is not closed/retained.",
+                public_reason="Subagent lifecycle is incomplete.",
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields},
@@ -466,7 +443,7 @@ def main() -> int:
             return stop_gate_result(
                 payload,
                 reason="acceptance_footer_risk_fail",
-                public_reason="Structured acceptance footer indicates risk status is unresolved/high.",
+                public_reason="Verification and risk status are inconsistent.",
                 acceptance_source=acceptance_source,
                 acceptance=base_acceptance(acceptance_source),
                 extra={**acceptance_fields},

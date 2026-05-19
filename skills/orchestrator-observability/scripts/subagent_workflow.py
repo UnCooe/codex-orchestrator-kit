@@ -18,6 +18,10 @@ from session_facts import (
     scan_session_files,
 )
 
+MIN_SAMPLE_SESSIONS = 5
+MIN_SAMPLE_WORK_DONE = 1
+MIN_SAMPLE_SPAWNS = 1
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate subagent workflow reports.")
@@ -155,6 +159,14 @@ def _load_previous_report(reports_root: Path, report_id: Optional[str]) -> Optio
     return candidates[0][2]
 
 
+def _is_compatible_baseline(previous_report: Dict[str, object], current_report: Dict[str, object]) -> bool:
+    return (
+        str(previous_report.get("report_type") or "") == str(current_report.get("report_type") or "")
+        and int(previous_report.get("since_days", 0) or 0) == int(current_report.get("since_days", 0) or 0)
+        and bool(previous_report.get("paths_included", False)) == bool(current_report.get("paths_included", False))
+    )
+
+
 def _compare_metric(current: int, previous: Optional[int], *, bigger_is_worse: bool = True) -> Dict[str, object]:
     if previous is None:
         return {"current": current, "previous": None, "delta": None, "status": "first_observation"}
@@ -204,6 +216,14 @@ def _heavy_work_signal_quality(classification: str, signal_sessions: int, covera
 
 
 def _build_trend_summary(current_report: Dict[str, object], previous_report: Optional[Dict[str, object]]) -> Dict[str, object]:
+    if previous_report and not _is_compatible_baseline(previous_report, current_report):
+        return {
+            "baseline_report": str(previous_report.get("report_name") or previous_report.get("generated_at") or ""),
+            "overall": "incomparable",
+            "signals": [],
+            "baseline_compatible": False,
+        }
+
     current_subagents = current_report.get("subagents", {}) if isinstance(current_report.get("subagents"), dict) else {}
     current_workflow = current_report.get("workflow_signals", {}) if isinstance(current_report.get("workflow_signals"), dict) else {}
     current_heavy = current_workflow.get("heavy_work_delegation", {}) if isinstance(current_workflow.get("heavy_work_delegation"), dict) else {}
@@ -277,12 +297,46 @@ def _build_trend_summary(current_report: Dict[str, object], previous_report: Opt
         "baseline_report": str(previous_report.get("report_name") or previous_report.get("generated_at") or "") if previous_report else "",
         "overall": overall,
         "signals": signals,
+        "baseline_compatible": previous_report is not None,
     }
 
 
-def _report_classification(action_policy: str, trend_overall: str, heavy_classification: str) -> str:
+def _sample_assessment(sessions_seen: int, work_done_messages: int, spawn_count: int) -> Dict[str, object]:
+    reasons = []
+    if sessions_seen < MIN_SAMPLE_SESSIONS:
+        reasons.append("low_session_count")
+    if work_done_messages < MIN_SAMPLE_WORK_DONE:
+        reasons.append("low_work_done_coverage")
+    if spawn_count < MIN_SAMPLE_SPAWNS:
+        reasons.append("no_spawn_activity")
+
+    sufficient = not (
+        sessions_seen < MIN_SAMPLE_SESSIONS
+        and work_done_messages < MIN_SAMPLE_WORK_DONE
+        and spawn_count < MIN_SAMPLE_SPAWNS
+    )
+    return {
+        "status": "sufficient" if sufficient else "insufficient",
+        "reasons": reasons,
+    }
+
+
+def _policy_from_issue_count(issue_count: int) -> str:
+    return "triage" if issue_count > 0 else "observe"
+
+
+def _report_classification(
+    action_policy: str,
+    trend_overall: str,
+    heavy_classification: str,
+    sample_status: str,
+) -> str:
+    if sample_status == "insufficient":
+        return "insufficient_sample"
     if trend_overall == "first_run":
         return "new"
+    if trend_overall == "incomparable":
+        return "repeated"
     has_open_issue = action_policy == "triage" or heavy_classification in {"misaligned", "partial"}
     if has_open_issue:
         if trend_overall in {"worsening", "mixed"}:
@@ -302,17 +356,32 @@ def _report_classification(action_policy: str, trend_overall: str, heavy_classif
 def _build_visible_summary(
     action_policy: str,
     classification: str,
+    workflow_policy: str,
+    acceptance_policy: str,
+    sample_assessment: Dict[str, object],
     closure_signals: Dict[str, object],
     heavy_work: Dict[str, object],
 ) -> Dict[str, str]:
-    first_line = "Subagent 工作流复盘：high" if action_policy == "triage" else "Subagent 工作流复盘：none"
+    sample_status = str(sample_assessment.get("status") or "unknown")
+    if sample_status == "insufficient":
+        first_line = "Subagent 工作流复盘：insufficient-sample"
+    else:
+        first_line = "Subagent 工作流复盘：high" if action_policy == "triage" else "Subagent 工作流复盘：none"
+    sample_reasons = ",".join(sample_assessment.get("reasons", [])) or "none"
     why_it_matters = (
+        f"sample={sample_status}({sample_reasons}); "
+        f"workflow={workflow_policy}; "
+        f"acceptance={acceptance_policy}; "
         f"lifecycle_delta={closure_signals.get('lifecycle_delta', 0)}; "
-        f"open_sessions={closure_signals.get('open_sessions', 0)}; "
         f"footer_missing={closure_signals.get('work_done_missing_acceptance_footer', 0)}; "
         f"heavy_quality={heavy_work.get('signal_quality', 'unknown')}; class={classification}"
     )
-    next_action = "close subagent loops and raise footer adoption" if action_policy == "triage" else "continue observe"
+    if sample_status == "insufficient":
+        next_action = "widen the window or wait for more completed turns before judging trend"
+    elif action_policy == "triage":
+        next_action = "fix workflow gaps first, then clean up footer adoption"
+    else:
+        next_action = "continue observe"
     return {
         "first_line": first_line,
         "why_it_matters": why_it_matters,
@@ -405,13 +474,22 @@ def build_report(
             if session_id:
                 per_session_heavy_signals[session_id] += 1
 
-        if event_type == "orchestrator_pre_tool_use" and status == "blocked" and str(row_dict.get("reason")) == "broad_scan_detected":
+        if (
+            event_type == "orchestrator_pre_tool_use"
+            and status == "blocked"
+            and str(row_dict.get("reason")) in {"broad_scan_detected", "broad_scan_without_research_capability"}
+        ):
             broad_scan_blocks += 1
         if (
             event_type == "orchestrator_pre_tool_use"
-            and status == "allow"
-            and str(row_dict.get("reason")) == "delegation_signal_detected"
-            and str(row_dict.get("tool_family")) == "shell_like"
+            and status in {"allow", "warn"}
+            and str(row_dict.get("reason")) in {
+                "delegation_signal_detected",
+                "workflow_signal_detected",
+                "broad_scan_without_research_capability",
+                "broad_scan_with_workflow_signal",
+                "broad_scan_with_research_capability",
+            }
         ):
             broad_scan_bypasses += 1
 
@@ -473,13 +551,20 @@ def build_report(
     heavy_signal_interpretation = _heavy_work_interpretation(
         heavy_signal_classification, heavy_signal_sessions, heavy_signal_sessions_with_spawn
     )
-
-    action_policy = _action_policy(
-        unclosed_delta,
-        broad_scan_bypasses,
-        int(closure.get("work_done_missing_acceptance_footer", 0)),
-        int(closure.get("work_done_missing_subagent_status", 0)),
+    work_done_messages = int(closure.get("work_done_messages", 0))
+    acceptance_issue_count = int(closure.get("work_done_missing_acceptance_footer", 0)) + int(
+        closure.get("work_done_missing_subagent_status", 0)
     )
+    workflow_issue_count = (
+        int(unclosed_delta > 0)
+        + int(broad_scan_bypasses > 0)
+        + int(heavy_signal_classification in {"misaligned", "partial"})
+    )
+    sample_assessment = _sample_assessment(len(sessions), work_done_messages, spawn_count)
+    workflow_policy = _policy_from_issue_count(workflow_issue_count)
+    acceptance_policy = _policy_from_issue_count(acceptance_issue_count)
+
+    action_policy = "triage" if workflow_policy == "triage" or acceptance_policy == "triage" else "observe"
     project_context_available = any(
         isinstance(item, dict) and bool(item.get("available")) for item in project_context.values()
     )
@@ -500,6 +585,8 @@ def build_report(
         "reviewer_id": "subagent-workflow",
         "standard": "default-v1",
         "action_policy": action_policy,
+        "workflow_policy": workflow_policy,
+        "acceptance_policy": acceptance_policy,
         "project_context_available": project_context_available,
         "fact_count": len(facts),
         "totals": dict(totals),
@@ -548,13 +635,14 @@ def build_report(
             "open_sessions": open_session_count,
             "broad_scan_bypasses": broad_scan_bypasses,
             "heavy_work_signal_quality": heavy_signal_quality,
-            "work_done_messages": int(closure.get("work_done_messages", 0)),
+            "work_done_messages": work_done_messages,
             "acceptance_footer_present": int(closure.get("acceptance_footer_present", 0)),
             "acceptance_footer_complete": int(closure.get("acceptance_footer_complete", 0)),
             "acceptance_footer_partial": int(closure.get("acceptance_footer_partial", 0)),
             "work_done_missing_acceptance_footer": int(closure.get("work_done_missing_acceptance_footer", 0)),
             "work_done_missing_subagent_status": int(closure.get("work_done_missing_subagent_status", 0)),
         },
+        "sample_assessment": sample_assessment,
         "tool_calls": dict(tool_calls),
         "project_context": project_context,
         "samples": samples,
@@ -566,10 +654,14 @@ def build_report(
         action_policy,
         str(data["trend"].get("overall") or "unknown"),
         heavy_signal_classification,
+        str(sample_assessment.get("status") or "unknown"),
     )
     data["visible_summary"] = _build_visible_summary(
         action_policy,
         str(data["classification"]),
+        workflow_policy,
+        acceptance_policy,
+        sample_assessment,
         data["closure_signals"],
         data["workflow_signals"]["heavy_work_delegation"],
     )
@@ -584,6 +676,8 @@ def build_report(
         "- Reviewer: `subagent-workflow`",
         "- Standard: `default-v1`",
         f"- Action policy: `{action_policy}`",
+        f"- Workflow policy: `{workflow_policy}`",
+        f"- Acceptance policy: `{acceptance_policy}`",
         f"- Classification: `{data['classification']}`",
         f"- Visible summary: {data['visible_summary']['first_line']}",
         f"- Why it matters: {data['visible_summary']['why_it_matters']}",
@@ -597,14 +691,15 @@ def build_report(
         f"- Invalid lines: {totals.get('invalid_lines', 0)}",
         f"- Filtered as older: {totals.get('filtered_older', 0)}",
         f"- Sessions seen: {len(sessions)}",
+        f"- Sample status: {sample_assessment['status']} ({', '.join(sample_assessment['reasons']) or 'none'})",
         "",
-        "## Subagent lifecycle",
+        "## Workflow health",
         f"- Spawn/Wait/Close: {spawn_count}/{wait_count}/{close_count}",
         f"- Unclosed delta: {unclosed_delta}",
         f"- Open sessions with unclosed subagents: {open_session_count}",
         "",
-        "## Closure signals",
-        f"- Work-done replies: {closure.get('work_done_messages', 0)}",
+        "## Acceptance signals",
+        f"- Work-done replies: {work_done_messages}",
         f"- Acceptance footer complete: {closure.get('acceptance_footer_complete', 0)}",
         f"- Acceptance footer partial: {closure.get('acceptance_footer_partial', 0)}",
         f"- Missing acceptance footer on work-done replies: {closure.get('work_done_missing_acceptance_footer', 0)}",
@@ -624,6 +719,7 @@ def build_report(
         "## Trend",
         f"- overall: {data['trend'].get('overall', 'unknown')}",
         f"- baseline_report: {data['trend'].get('baseline_report') or 'none'}",
+        f"- baseline_compatible: {str(bool(data['trend'].get('baseline_compatible', False))).lower()}",
         "",
         "## Project context",
     ]
@@ -667,6 +763,9 @@ def build_report(
         "subagents": data["subagents"],
         "workflow_signals": data["workflow_signals"],
         "closure_signals": data["closure_signals"],
+        "sample_assessment": data["sample_assessment"],
+        "workflow_policy": data["workflow_policy"],
+        "acceptance_policy": data["acceptance_policy"],
         "trend": data["trend"],
         "classification": data["classification"],
         "visible_summary": data["visible_summary"],
