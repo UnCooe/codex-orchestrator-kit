@@ -418,6 +418,9 @@ def build_report(
     heavy_work_delegation_signals = 0
     broad_scan_bypasses = 0
     broad_scan_blocks = 0
+    soft_acceptance_warnings = 0
+    heuristic_acceptance_passes = 0
+    repair_turn_blocks = 0
 
     for row in facts:
         row_dict = row if isinstance(row, dict) else row.__dict__
@@ -473,6 +476,25 @@ def build_report(
             heavy_work_delegation_signals += 1
             if session_id:
                 per_session_heavy_signals[session_id] += 1
+
+        if event_type == "orchestrator_stop":
+            reason = str(row_dict.get("reason", ""))
+            if status == "warn" and reason in {
+                "acceptance_footer_missing_soft",
+                "acceptance_footer_incomplete_soft",
+                "acceptance_review_status_soft",
+            }:
+                soft_acceptance_warnings += 1
+            if status == "warn" and reason == "acceptance_natural_block_pass":
+                heuristic_acceptance_passes += 1
+            if status == "blocked" and reason in {
+                "subagent_close_missing",
+                "subagent_lifecycle_missing",
+                "acceptance_footer_subagent_status_reject",
+                "acceptance_footer_verification_fail",
+                "acceptance_footer_risk_fail",
+            }:
+                repair_turn_blocks += 1
 
         if (
             event_type == "orchestrator_pre_tool_use"
@@ -634,6 +656,9 @@ def build_report(
             "lifecycle_delta": unclosed_delta,
             "open_sessions": open_session_count,
             "broad_scan_bypasses": broad_scan_bypasses,
+            "soft_acceptance_warnings": soft_acceptance_warnings,
+            "heuristic_acceptance_passes": heuristic_acceptance_passes,
+            "repair_turn_blocks": repair_turn_blocks,
             "heavy_work_signal_quality": heavy_signal_quality,
             "work_done_messages": work_done_messages,
             "acceptance_footer_present": int(closure.get("acceptance_footer_present", 0)),
@@ -697,6 +722,7 @@ def build_report(
         f"- Spawn/Wait/Close: {spawn_count}/{wait_count}/{close_count}",
         f"- Unclosed delta: {unclosed_delta}",
         f"- Open sessions with unclosed subagents: {open_session_count}",
+        f"- Repair-turn blocks: {repair_turn_blocks}",
         "",
         "## Acceptance signals",
         f"- Work-done replies: {work_done_messages}",
@@ -704,6 +730,8 @@ def build_report(
         f"- Acceptance footer partial: {closure.get('acceptance_footer_partial', 0)}",
         f"- Missing acceptance footer on work-done replies: {closure.get('work_done_missing_acceptance_footer', 0)}",
         f"- Missing subagent lifecycle status on work-done replies: {closure.get('work_done_missing_subagent_status', 0)}",
+        f"- Soft acceptance warnings: {soft_acceptance_warnings}",
+        f"- Heuristic acceptance passes: {heuristic_acceptance_passes}",
         "",
         "## Delegation signals",
         f"- Delegation rate (spawn / tool calls): {delegation_rate}",

@@ -76,6 +76,43 @@ VERIFICATION_EXCEPTION_TOKENS = (
 )
 
 LOW_RISK_TOKENS = ("low", "none", "not significant", "低")
+SOFT_ACCEPTANCE_REASONS = {
+    "acceptance_footer_missing_soft",
+    "acceptance_footer_incomplete_soft",
+    "acceptance_review_status_soft",
+    "acceptance_natural_block_pass",
+}
+BODY_NEGATIVE_VERIFICATION_PATTERNS = [
+    r"\bnot run\b",
+    r"\bcould not run\b",
+    r"\bblocked\b",
+    r"\bdeferred\b",
+    r"\bstatic check",
+    r"\bstatic analysis",
+    "未跑",
+    "未运行",
+    "未执行",
+    "无法运行",
+    "阻塞",
+    "只做静态检查",
+]
+BODY_REMAINING_RISK_PATTERNS = [
+    r"\bstill need\b",
+    r"\bremaining\b",
+    r"\bnot completed\b",
+    r"\bneeds validation\b",
+    r"\bneeds tunnel\b",
+    r"\bmissing\b",
+    r"\bdeferred\b",
+    "仍缺",
+    "未完成",
+    "待验证",
+    "剩余风险",
+    "还缺",
+    "仍需",
+]
+ACCEPTANCE_BLOCK_RE = re.compile(r"(?ims)(?:^|\n)\s*ACCEPTANCE\s*:\s*(?P<body>.*)")
+ACCEPTANCE_BLOCK_ITEM_RE = re.compile(r"(?im)^\s*(?:[-*•]|\d+\.)?\s*(?P<key>[A-Za-z][A-Za-z /_-]{2,40})\s*:\s*(?P<value>.+?)\s*$")
 
 
 def matches_any(patterns, text: str) -> bool:
@@ -135,6 +172,64 @@ def parse_acceptance_footer(message: str) -> dict[str, str]:
     return values
 
 
+def parse_acceptance_block(message: str) -> dict[str, str]:
+    if not message:
+        return {}
+    match = ACCEPTANCE_BLOCK_RE.search(message)
+    if not match:
+        return {}
+    body = match.group("body").strip()
+    if not body:
+        return {}
+
+    captured: dict[str, str] = {}
+    for item in ACCEPTANCE_BLOCK_ITEM_RE.finditer(body):
+        key = item.group("key").strip().lower().replace(" ", "_").replace("/", "_")
+        captured[key] = item.group("value").strip()
+
+    acceptance: dict[str, str] = {}
+    verification_bits = " ".join(
+        captured.get(key, "")
+        for key in (
+            "verification_result",
+            "verification",
+            "v6_preload_result",
+            "v6_cache_result",
+            "checked_target",
+            "checked_es_env",
+            "time_window",
+        )
+        if captured.get(key)
+    ).strip()
+    risk_bits = " ".join(
+        captured.get(key, "")
+        for key in ("remaining_risk", "main_remaining_latency_suspect")
+        if captured.get(key)
+    ).strip()
+    lifecycle_bits = " ".join(
+        captured.get(key, "")
+        for key in ("subagent_lifecycle", "subagents", "lifecycle")
+        if captured.get(key)
+    ).strip()
+
+    if verification_bits:
+        acceptance["verification_status"] = "pass"
+    if risk_bits:
+        acceptance["risk_status"] = "medium"
+    elif verification_bits:
+        acceptance["risk_status"] = "low"
+    if lifecycle_bits:
+        normalized = lifecycle_bits.lower()
+        if "retained" in normalized:
+            acceptance["subagent_status"] = f"retained because {lifecycle_bits}"
+        elif "closed" in normalized or "已关闭" in lifecycle_bits or "收干净" in lifecycle_bits:
+            acceptance["subagent_status"] = "closed"
+    else:
+        acceptance["subagent_status"] = "not_used"
+    acceptance["review_status"] = "not_required"
+    return acceptance
+
+
 def _load_turn_items(transcript_path: str | None) -> list[dict]:
     if not transcript_path:
         return []
@@ -189,6 +284,27 @@ def stop_gate_result(
     return 0
 
 
+def stop_soft_result(
+    payload: dict,
+    *,
+    reason: str,
+    acceptance_source: str,
+    acceptance: dict[str, object],
+    extra: dict[str, object] | None = None,
+) -> int:
+    emit_observability_event(
+        payload,
+        event_name="stop",
+        status="warn",
+        reason=reason,
+        acceptance_source=acceptance_source,
+        acceptance=acceptance,
+        extra=extra,
+    )
+    print(json.dumps({"continue": True}))
+    return 0
+
+
 def contains_unsafe_git_directive(message: str) -> bool:
     if not message:
         return False
@@ -197,6 +313,16 @@ def contains_unsafe_git_directive(message: str) -> bool:
 
 def missing_acceptance_fields(fields: dict[str, str]) -> list[str]:
     return [field for field in ACCEPTANCE_FIELDS if not str(fields.get(field, "")).strip()]
+
+
+def repair_only_reason(reason: str) -> str:
+    if reason in {
+        "subagent_close_missing",
+        "subagent_lifecycle_missing",
+        "acceptance_footer_subagent_status_reject",
+    }:
+        return "Reply with only the missing subagent lifecycle line. Do not restate the summary."
+    return "Reply with only the missing or corrected acceptance footer line(s). Do not restate the summary."
 
 
 def acceptance_payload(
@@ -220,6 +346,38 @@ def acceptance_payload(
     for field in ACCEPTANCE_FIELDS:
         payload[field] = fields.get(field, "")
     return payload
+
+
+def _body_without_footer(message: str) -> str:
+    if not message:
+        return ""
+    lines = []
+    for line in message.splitlines():
+        if ACCEPTANCE_FIELD_RE.search(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def body_has_negative_verification(message: str) -> bool:
+    return matches_any(BODY_NEGATIVE_VERIFICATION_PATTERNS, message.lower())
+
+
+def body_has_remaining_risk(message: str) -> bool:
+    return matches_any(BODY_REMAINING_RISK_PATTERNS, message.lower())
+
+
+def acceptance_source_and_fields(message: str) -> tuple[str, dict[str, str]]:
+    structured = parse_acceptance_footer(message)
+    if structured:
+        missing = missing_acceptance_fields(structured)
+        if len(structured) == len(ACCEPTANCE_FIELDS) and not missing:
+            return "structured", structured
+        return "partial", structured
+    natural = parse_acceptance_block(message)
+    if natural:
+        return "natural_block", natural
+    return "missing", {}
 
 
 def current_turn_text(transcript_path: str | None) -> str:
@@ -296,18 +454,23 @@ def main() -> int:
     spawn_count, close_count = current_turn_subagent_counts(payload.get("transcript_path"))
     current_capabilities = current_turn_capabilities(payload)
     has_subagent_lifecycle = matches_any(SUBAGENT_LIFECYCLE, message)
-    acceptance_fields = parse_acceptance_footer(message)
+    acceptance_source, acceptance_fields = acceptance_source_and_fields(message)
     footer_missing = missing_acceptance_fields(acceptance_fields)
-    if len(acceptance_fields) == len(ACCEPTANCE_FIELDS) and not footer_missing:
-        acceptance_source = "structured"
-    elif acceptance_fields:
-        acceptance_source = "partial"
-    else:
-        acceptance_source = "missing"
     has_verification = matches_any(VERIFICATION, message_lower)
     did_work = matches_any(WORK_DONE, message)
+    body_text = _body_without_footer(message)
+    verification_contradiction = (
+        acceptance_source in {"structured", "natural_block"}
+        and is_status_positive("verification_status", acceptance_fields.get("verification_status", ""))
+        and body_has_negative_verification(body_text)
+    )
+    risk_contradiction = (
+        acceptance_source in {"structured", "natural_block"}
+        and is_status_positive("risk_status", acceptance_fields.get("risk_status", ""))
+        and body_has_remaining_risk(body_text)
+    )
     structured_verification_signal = (
-        acceptance_source == "structured"
+        acceptance_source in {"structured", "natural_block"}
         and is_status_positive("verification_status", acceptance_fields.get("verification_status", ""))
     )
     base_acceptance = lambda source: acceptance_payload(
@@ -327,7 +490,7 @@ def main() -> int:
                 return stop_gate_result(
                     payload,
                     reason="acceptance_footer_subagent_status_reject",
-                    public_reason="Subagent lifecycle is incomplete.",
+                    public_reason=repair_only_reason("acceptance_footer_subagent_status_reject"),
                     acceptance_source=acceptance_source,
                     acceptance=base_acceptance(acceptance_source),
                     extra={**acceptance_fields},
@@ -339,7 +502,7 @@ def main() -> int:
         return stop_gate_result(
             payload,
             reason="subagent_close_missing",
-            public_reason="Subagent lifecycle is incomplete.",
+            public_reason=repair_only_reason("subagent_close_missing"),
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
             extra={"spawn_count": spawn_count, "close_count": close_count},
@@ -349,7 +512,7 @@ def main() -> int:
         return stop_gate_result(
             payload,
             reason="subagent_lifecycle_missing",
-            public_reason="Subagent lifecycle is incomplete.",
+            public_reason=repair_only_reason("subagent_lifecycle_missing"),
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
             extra={
@@ -358,24 +521,90 @@ def main() -> int:
             },
         )
 
-    if did_work and acceptance_source == "partial":
-        return stop_gate_result(
+    if acceptance_source in {"structured", "natural_block"}:
+        verification_value = acceptance_fields.get("verification_status", "")
+        risk_value = acceptance_fields.get("risk_status", "")
+        verification_ok = (
+            is_status_positive("verification_status", verification_value)
+            or is_verification_exception_acceptable(verification_value, risk_value)
+        )
+        review_ok = is_status_positive("review_status", acceptance_fields.get("review_status", ""))
+        subagent_ok = is_status_positive("subagent_status", acceptance_fields.get("subagent_status", ""))
+        risk_ok = is_status_positive("risk_status", risk_value)
+
+        if did_work and (not verification_ok or verification_contradiction):
+            return stop_gate_result(
+                payload,
+                reason="acceptance_footer_verification_fail",
+                public_reason=repair_only_reason("acceptance_footer_verification_fail"),
+                acceptance_source=acceptance_source,
+                acceptance=base_acceptance(acceptance_source),
+                extra={**acceptance_fields, "has_verification": False, "verification_contradiction": verification_contradiction},
+            )
+
+        if used_subagents and not subagent_ok:
+            return stop_gate_result(
+                payload,
+                reason="acceptance_footer_subagent_status_reject",
+                public_reason=repair_only_reason("acceptance_footer_subagent_status_reject"),
+                acceptance_source=acceptance_source,
+                acceptance=base_acceptance(acceptance_source),
+                extra={**acceptance_fields},
+            )
+
+        if not risk_ok or risk_contradiction:
+            return stop_gate_result(
+                payload,
+                reason="acceptance_footer_risk_fail",
+                public_reason=repair_only_reason("acceptance_footer_risk_fail"),
+                acceptance_source=acceptance_source,
+                acceptance=base_acceptance(acceptance_source),
+                extra={**acceptance_fields, "risk_contradiction": risk_contradiction},
+            )
+
+        if did_work and not review_ok:
+            return stop_soft_result(
+                payload,
+                reason="acceptance_review_status_soft",
+                acceptance_source=acceptance_source,
+                acceptance=base_acceptance(acceptance_source),
+                extra={**acceptance_fields, "has_review": False},
+            )
+
+        if acceptance_source == "natural_block":
+            return stop_soft_result(
+                payload,
+                reason="acceptance_natural_block_pass",
+                acceptance_source=acceptance_source,
+                acceptance=base_acceptance(acceptance_source),
+                extra={**acceptance_fields, "current_turn_capabilities": sorted(current_capabilities)},
+            )
+
+        emit_observability_event(
             payload,
-            reason="acceptance_footer_incomplete",
-            public_reason="Acceptance footer is incomplete.",
+            event_name="stop",
+            status="allow",
+            reason="acceptance_footer_passed",
             acceptance_source=acceptance_source,
             acceptance=base_acceptance(acceptance_source),
-            extra={
-                **acceptance_fields,
-                "missing_fields": footer_missing,
-            },
+            extra={**acceptance_fields, "current_turn_capabilities": sorted(current_capabilities)},
+        )
+        print(json.dumps({"continue": True}))
+        return 0
+
+    if did_work and acceptance_source == "partial":
+        return stop_soft_result(
+            payload,
+            reason="acceptance_footer_incomplete_soft",
+            acceptance_source=acceptance_source,
+            acceptance=base_acceptance(acceptance_source),
+            extra={**acceptance_fields, "missing_fields": footer_missing},
         )
 
     if did_work and acceptance_source == "missing":
-        return stop_gate_result(
+        return stop_soft_result(
             payload,
-            reason="acceptance_footer_missing",
-            public_reason="Acceptance footer is incomplete.",
+            reason="acceptance_footer_missing_soft",
             acceptance_source="missing",
             acceptance=base_acceptance("missing"),
             extra={
@@ -394,69 +623,6 @@ def main() -> int:
             acceptance_source=acceptance_source if acceptance_source == "structured" else "missing",
             acceptance=base_acceptance(acceptance_source if acceptance_source == "structured" else "missing"),
             extra={"current_turn_capabilities": sorted(current_capabilities)},
-        )
-        print(json.dumps({"continue": True}))
-        return 0
-
-    if acceptance_source == "structured":
-        verification_value = acceptance_fields.get("verification_status", "")
-        risk_value = acceptance_fields.get("risk_status", "")
-        verification_ok = (
-            is_status_positive("verification_status", verification_value)
-            or is_verification_exception_acceptable(verification_value, risk_value)
-        )
-        review_ok = is_status_positive("review_status", acceptance_fields.get("review_status", ""))
-        subagent_ok = is_status_positive("subagent_status", acceptance_fields.get("subagent_status", ""))
-        risk_ok = is_status_positive("risk_status", risk_value)
-
-        if did_work and not verification_ok:
-            return stop_gate_result(
-                payload,
-                reason="acceptance_footer_verification_fail",
-                public_reason="Verification and risk status are inconsistent.",
-                acceptance_source=acceptance_source,
-                acceptance=base_acceptance(acceptance_source),
-                extra={**acceptance_fields, "has_verification": False},
-            )
-
-        if did_work and not review_ok:
-            return stop_gate_result(
-                payload,
-                reason="acceptance_footer_review_fail",
-                public_reason="Review status is incomplete.",
-                acceptance_source=acceptance_source,
-                acceptance=base_acceptance(acceptance_source),
-                extra={**acceptance_fields, "has_review": False},
-            )
-
-        if used_subagents and not subagent_ok:
-            return stop_gate_result(
-                payload,
-                reason="acceptance_footer_subagent_status_reject",
-                public_reason="Subagent lifecycle is incomplete.",
-                acceptance_source=acceptance_source,
-                acceptance=base_acceptance(acceptance_source),
-                extra={**acceptance_fields},
-            )
-
-        if not risk_ok:
-            return stop_gate_result(
-                payload,
-                reason="acceptance_footer_risk_fail",
-                public_reason="Verification and risk status are inconsistent.",
-                acceptance_source=acceptance_source,
-                acceptance=base_acceptance(acceptance_source),
-                extra={**acceptance_fields},
-            )
-
-        emit_observability_event(
-            payload,
-            event_name="stop",
-            status="allow",
-            reason="acceptance_footer_passed",
-            acceptance_source=acceptance_source,
-            acceptance=base_acceptance(acceptance_source),
-            extra={**acceptance_fields, "current_turn_capabilities": sorted(current_capabilities)},
         )
         print(json.dumps({"continue": True}))
         return 0

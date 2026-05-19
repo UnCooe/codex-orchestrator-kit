@@ -101,3 +101,5 @@ Before final response:
 
 Treat the footer requirement as a static contract, not as something a hook will remind you about later.
 Assume `UserPromptSubmit` is silent by default and only emits a short high-risk reminder when the workflow is already in an alert state.
+If a stop-hook repair round happens, reply with only the missing acceptance footer or subagent lifecycle line. Do not restate the main summary.
+A natural-language `ACCEPTANCE:` block is acceptable when it clearly covers verification status, remaining risk, and subagent lifecycle.

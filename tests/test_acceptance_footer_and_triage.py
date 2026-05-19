@@ -61,6 +61,23 @@ def _run_user_prompt_hook(payload: dict) -> dict:
     return json.loads(proc.stdout) if proc.stdout.strip() else {}
 
 
+def _read_last_observability_event(codex_home: Path, event_name: str) -> dict:
+    events_root = codex_home / "orchestrator-observability" / "events"
+    candidates = sorted(events_root.glob("*.jsonl"))
+    if not candidates:
+        return {}
+    last_match = {}
+    for path in candidates:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            if record.get("event_name") == event_name:
+                last_match = record
+    return last_match
+
+
 class AcceptanceFooterAndTriageTests(unittest.TestCase):
     def test_user_prompt_heavy_prompt_is_silent_by_default(self) -> None:
         output = _run_user_prompt_hook({"prompt": "please implement this feature and add tests"})
@@ -478,6 +495,54 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(output["workflow_signals"]["broad_scan_blocks"], 1)
             self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 1)
 
+    def test_subagent_workflow_reports_soft_acceptance_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            events = codex_home / "orchestrator-observability" / "events" / "2026-05-02.jsonl"
+            _write_jsonl(
+                events,
+                [
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "stop",
+                        "status": "warn",
+                        "reason": "acceptance_footer_missing_soft",
+                        "created_at": "2026-05-02T00:00:10Z",
+                        "cwd": "/repo/one",
+                    },
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "stop",
+                        "status": "warn",
+                        "reason": "acceptance_natural_block_pass",
+                        "created_at": "2026-05-02T00:00:20Z",
+                        "cwd": "/repo/one",
+                    },
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "stop",
+                        "status": "blocked",
+                        "reason": "acceptance_footer_verification_fail",
+                        "created_at": "2026-05-02T00:00:30Z",
+                        "cwd": "/repo/one",
+                    },
+                ],
+            )
+
+            output = build_subagent_workflow_report(
+                codex_home,
+                since_days=30,
+                report_id="workflow-soft-acceptance",
+                reports_dir=str(reports_root),
+                max_samples=5,
+            )
+
+            self.assertEqual(output["closure_signals"]["soft_acceptance_warnings"], 1)
+            self.assertEqual(output["closure_signals"]["heuristic_acceptance_passes"], 1)
+            self.assertEqual(output["closure_signals"]["repair_turn_blocks"], 1)
+
     def test_analyze_requires_subagent_status_only_when_signal_present(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_home = Path(temp_dir) / ".codex"
@@ -528,7 +593,10 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertEqual(output["decision"], "block")
-            self.assertEqual(output["reason"], "Subagent lifecycle is incomplete.")
+            self.assertEqual(
+                output["reason"],
+                "Reply with only the missing subagent lifecycle line. Do not restate the summary.",
+            )
 
     def test_stop_allows_heavy_turn_not_used_without_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -616,6 +684,119 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertTrue(output.get("continue"))
+
+    def test_stop_soft_warns_on_missing_footer_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "implement the UI cleanup"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": "implemented the requested UI cleanup and verified it locally.",
+                }
+            )
+
+            self.assertTrue(output.get("continue"))
+            event = _read_last_observability_event(codex_home, "stop")
+            self.assertEqual(event.get("status"), "warn")
+            self.assertEqual(event.get("reason"), "acceptance_footer_missing_soft")
+
+    def test_stop_accepts_natural_acceptance_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "review the latency case"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": (
+                        "implemented the report update.\n\n"
+                        "ACCEPTANCE:\n"
+                        "- Checked target: aiserver-test:/opt/project/midoo_pre\n"
+                        "- Checked ES env: aiserver-pre / sg_pre\n"
+                        "- Time window: 2026-05-19 14:25-14:37 +0800\n"
+                        "- Verification result: expected, enable_word_timestamps=true\n"
+                    ),
+                }
+            )
+
+            self.assertTrue(output.get("continue"))
+            event = _read_last_observability_event(codex_home, "stop")
+            self.assertEqual(event.get("status"), "warn")
+            self.assertEqual(event.get("reason"), "acceptance_natural_block_pass")
+
+    def test_stop_blocks_pass_footer_when_body_says_pytest_not_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "implement the backend fix"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": (
+                        "implemented the backend fix. pytest not run in this environment.\n"
+                        "verification_status=pass\n"
+                        "review_status=pass\n"
+                        "subagent_status=not_used\n"
+                        "risk_status=low"
+                    ),
+                }
+            )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertEqual(
+                output["reason"],
+                "Reply with only the missing or corrected acceptance footer line(s). Do not restate the summary.",
+            )
+
+    def test_stop_blocks_low_risk_footer_when_body_has_remaining_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "implement the debug panel"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": (
+                        "implemented the panel. remaining risk: still needs production tunnel validation.\n"
+                        "verification_status=pass\n"
+                        "review_status=pass\n"
+                        "subagent_status=not_used\n"
+                        "risk_status=low"
+                    ),
+                }
+            )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertEqual(
+                output["reason"],
+                "Reply with only the missing or corrected acceptance footer line(s). Do not restate the summary.",
+            )
 
     def test_pre_tool_soft_policy_warns_for_broad_scan_without_research_capability(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
