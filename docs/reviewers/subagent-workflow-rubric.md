@@ -42,7 +42,7 @@ A run is good when:
 
 - heavy work has reasonable delegation
 - spawn/wait/close are close to balanced
-- final response carries a clear acceptance footer and states `Subagents: closed` or explains retention
+- lifecycle can be reconstructed from transcript and hook events without relying on user-visible footer text
 - broad scans are blocked or justified
 - main thread does not spend excessive context on noisy exploration
 
@@ -54,7 +54,7 @@ A run is watch-level when:
 - delegation rate is low but the observed work may be small
 - broad-scan bypass signals exist but are likely intentional
 - project context is missing, making task-size judgment lower confidence
-- acceptance footer coverage is inconsistent, but the lifecycle signal is still reconstructable
+- user-visible formatting is inconsistent, but lifecycle and state signals are still reconstructable
 
 Watch should produce a short triage summary and avoid automatic cleanup.
 Watch is also the default outcome when signals exist but trend says they are stable background rather than a fresh regression.
@@ -67,7 +67,7 @@ A run is bad when:
 - multiple sessions have retained agents without explanation
 - heavy work is repeatedly handled in the main thread without delegation
 - broad scans repeatedly bypass the guard without a clear reason
-- final responses omit acceptance or lifecycle status after delegated work
+- lifecycle or state-integrity cannot be reconstructed after delegated work
 - repeated signals make it unclear whether the harness or the agent is drifting
 
 Bad should request human review before changing workflow rules.

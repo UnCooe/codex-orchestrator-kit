@@ -566,6 +566,7 @@ class SessionFact:
     acceptance_has_verification_signal: bool = False
     acceptance_has_subagent_signal: bool = False
     acceptance_is_structured_complete: bool = False
+    completion_state: Dict[str, object] | None = None
     acceptance_footer_verification_fail: bool = False
     acceptance_footer_review_fail: bool = False
     acceptance_footer_subagent_fail: bool = False
@@ -695,6 +696,15 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
             acceptance_source == "structured"
             and all(acceptance.get(field) for field in ACCEPTANCE_FIELDS)
         )
+        completion_state = None
+        if isinstance(record.get("completion_state"), dict):
+            completion_state = {str(k): v for k, v in record["completion_state"].items() if isinstance(k, str)}
+        elif isinstance(record.get("extra"), dict) and isinstance(record["extra"].get("completion_state"), dict):
+            completion_state = {
+                str(k): v for k, v in record["extra"]["completion_state"].items() if isinstance(k, str)
+            }
+        elif isinstance(acceptance.get("completion_state"), dict):
+            completion_state = {str(k): v for k, v in acceptance["completion_state"].items() if isinstance(k, str)}
 
         facts.append(
             SessionFact(
@@ -728,6 +738,7 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
                 acceptance_has_verification_signal=_to_bool(acceptance.get("has_verification_signal")),
                 acceptance_has_subagent_signal=_to_bool(acceptance.get("has_subagent_signal")),
                 acceptance_is_structured_complete=structured_complete,
+                completion_state=completion_state,
                 acceptance_footer_verification_fail=structured_complete and not (
                     _acceptance_status_positive("verification_status", verification_status)
                     or _verification_exception_acceptable(verification_status, risk_status)
@@ -774,6 +785,7 @@ def fact_to_dict(fact: SessionFact) -> Dict[str, object]:
             "has_verification_signal": fact.acceptance_has_verification_signal,
             "has_subagent_signal": fact.acceptance_has_subagent_signal,
             "is_structured_complete": fact.acceptance_is_structured_complete,
+            "completion_state": fact.completion_state or {},
             "footer_verification_fail": fact.acceptance_footer_verification_fail,
             "footer_review_fail": fact.acceptance_footer_review_fail,
             "footer_subagent_fail": fact.acceptance_footer_subagent_fail,

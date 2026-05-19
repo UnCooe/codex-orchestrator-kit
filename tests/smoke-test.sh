@@ -270,7 +270,7 @@ import json
 import sys
 
 obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block" or obj.get("suppressOutput") is not True or "partial/not_run/blocked" not in obj.get("reason", ""):
+if obj.get("decision") != "block" or obj.get("suppressOutput") is not True or obj.get("reason") != "Verification claim conflicts with the summary.":
     raise SystemExit("Stop gate should block low-risk partial verification while suppressing UI output")
 PY
 
@@ -283,8 +283,8 @@ import json
 import sys
 
 obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block" or obj.get("suppressOutput") is not True or "Acceptance footer is incomplete" not in obj.get("reason", ""):
-    raise SystemExit("Partial acceptance footer should be blocked while suppressing UI output")
+if obj.get("continue") is not True:
+    raise SystemExit("Partial acceptance formatting should not be blocked")
 PY
 
 SPACE_PY_DIR="$TMP_ROOT/python with space"
@@ -429,12 +429,8 @@ JSON
 import json
 import sys
 
-obj = json.loads(sys.argv[1])
-context = obj["hookSpecificOutput"]["additionalContext"]
-if "verification_status" not in context or "Subagents: closed" not in context:
-    raise SystemExit("Benign prompt did not receive acceptance context")
-if "ORCHESTRATOR CHECK" in context:
-    raise SystemExit("Benign prompt should not receive heavy prompt context")
+if sys.argv[1].strip():
+    raise SystemExit("Benign prompt should stay silent by default")
 PY
 
 HEAVY_PROMPT=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
@@ -442,13 +438,10 @@ HEAVY_PROMPT=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
 JSON
 )
 "$PYTHON_BIN" - "$HEAVY_PROMPT" <<'PY'
-import json
 import sys
 
-obj = json.loads(sys.argv[1])
-context = obj["hookSpecificOutput"]["additionalContext"]
-if "verification_status" not in context or "Subagents: closed" not in context or "ORCHESTRATOR CHECK" not in context:
-    raise SystemExit("Heavy prompt did not receive acceptance and heavy contexts")
+if sys.argv[1].strip():
+    raise SystemExit("Heavy prompt should stay silent by default unless a high-risk alert is pending")
 PY
 
 HIGH_REPORT="$REPORT_DIR/orchestrator-observability-high-smoke.json"
@@ -517,15 +510,10 @@ SUPPRESSED=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
 JSON
 )
 "$PYTHON_BIN" - "$SUPPRESSED" <<'PY'
-import json
 import sys
 
-obj = json.loads(sys.argv[1])
-context = obj["hookSpecificOutput"]["additionalContext"]
-if "verification_status" not in context:
-    raise SystemExit("Acceptance context missing after high-risk reminder suppression")
-if "ORCHESTRATOR HIGH-RISK ALERT" in context:
-    raise SystemExit("High-risk reminder should be suppressed within 24 hours")
+if sys.argv[1].strip():
+    raise SystemExit("High-risk reminder should be suppressed to a silent response within 24 hours")
 PY
 
 LOW_REPORT="$REPORT_DIR/orchestrator-observability-low-smoke.json"

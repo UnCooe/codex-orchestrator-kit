@@ -57,7 +57,7 @@ For every subagent:
 - close the subagent immediately after its result is collected, unless it is needed for the same continuous workflow
 - if retaining a subagent, state the reason, next task, and expected close point
 
-Before final response, include either `Subagents: closed` or `Subagents: retained because ...`.
+Before final response, close finished subagents. Only mention retained subagents if one is intentionally left open for the next turn.
 
 ## Main Thread Contract
 
@@ -78,7 +78,7 @@ Ask subagents to return only:
 
 Do not paste raw logs, full file dumps, or long reasoning into the main thread. Summarize and cite only the evidence needed for the decision.
 Internal workflow contracts are for hooks and observability, not for the user-visible reply.
-Do not paste `WORK_CONTRACT_BEGIN/END`, role-registration text, or similar control blocks into the visible response.
+Do not paste `WORK_CONTRACT_BEGIN/END`, role-registration text, `ACCEPTANCE:` blocks, or similar control blocks into the visible response unless the user explicitly asks for workflow detail.
 If the user needs to understand the execution path, compress it into one short sentence such as:
 `执行模式：targeted_refactor；范围限于 hooks/tests；本轮未委托，因为当前运行时不适合默认委托。`
 
@@ -88,18 +88,9 @@ Before final response:
 - verify the original request is satisfied
 - mention tests/checks run, or why they were not run
 - include review/critique outcome for heavy work, or why it was omitted
-- include `Subagents: closed` or `Subagents: retained because ...`
 - call out remaining assumptions, risks, or rollback notes
 - close unused subagents when the workflow is complete
-- Include a compact acceptance footer with:
-  - `verification_status`
-  - `review_status`
-  - `subagent_status`
-  - `risk_status`
-  Example:
-  `verification_status=pass; review_status=pass; subagent_status=closed; risk_status=low`
+- keep the final reply user-facing; do not add machine-only acceptance or lifecycle fields by default
 
-Treat the footer requirement as a static contract, not as something a hook will remind you about later.
-Assume `UserPromptSubmit` is silent by default and only emits a short high-risk reminder when the workflow is already in an alert state.
-If a stop-hook repair round happens, reply with only the missing acceptance footer or subagent lifecycle line. Do not restate the main summary.
-A natural-language `ACCEPTANCE:` block is acceptable when it clearly covers verification status, remaining risk, and subagent lifecycle.
+Hooks infer lifecycle, verification, and risk from transcript events plus summary semantics. Assume `UserPromptSubmit` is silent by default and only emits a short high-risk reminder when the workflow is already in an alert state.
+If a stop hook blocks the turn, it is because the result looks internally inconsistent or unsafe, not because a footer is missing.

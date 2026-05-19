@@ -495,7 +495,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(output["workflow_signals"]["broad_scan_blocks"], 1)
             self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 1)
 
-    def test_subagent_workflow_reports_soft_acceptance_warnings(self) -> None:
+    def test_subagent_workflow_reports_completion_integrity_signals(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_home = Path(temp_dir) / ".codex"
             reports_root = codex_home / "orchestrator-observability" / "reports"
@@ -508,15 +508,17 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                         "event": "orchestrator_observability",
                         "event_name": "stop",
                         "status": "warn",
-                        "reason": "acceptance_footer_missing_soft",
+                        "reason": "formatting_only_missing_acceptance",
+                        "completion_state": {"subagent_lifecycle_state": "not_used"},
                         "created_at": "2026-05-02T00:00:10Z",
                         "cwd": "/repo/one",
                     },
                     {
                         "event": "orchestrator_observability",
                         "event_name": "stop",
-                        "status": "warn",
-                        "reason": "acceptance_natural_block_pass",
+                        "status": "allow",
+                        "reason": "stop_gate_passed",
+                        "completion_state": {"subagent_lifecycle_state": "closed"},
                         "created_at": "2026-05-02T00:00:20Z",
                         "cwd": "/repo/one",
                     },
@@ -524,8 +526,18 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                         "event": "orchestrator_observability",
                         "event_name": "stop",
                         "status": "blocked",
-                        "reason": "acceptance_footer_verification_fail",
+                        "reason": "verification_claim_conflict",
+                        "completion_state": {"subagent_lifecycle_state": "closed"},
                         "created_at": "2026-05-02T00:00:30Z",
+                        "cwd": "/repo/one",
+                    },
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "stop",
+                        "status": "blocked",
+                        "reason": "subagent_lifecycle_incomplete",
+                        "completion_state": {"subagent_lifecycle_state": "retained_or_incomplete"},
+                        "created_at": "2026-05-02T00:00:40Z",
                         "cwd": "/repo/one",
                     },
                 ],
@@ -539,9 +551,10 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 max_samples=5,
             )
 
-            self.assertEqual(output["closure_signals"]["soft_acceptance_warnings"], 1)
-            self.assertEqual(output["closure_signals"]["heuristic_acceptance_passes"], 1)
-            self.assertEqual(output["closure_signals"]["repair_turn_blocks"], 1)
+            self.assertEqual(output["closure_signals"]["formatting_only_warnings"], 1)
+            self.assertEqual(output["closure_signals"]["hidden_lifecycle_successes"], 2)
+            self.assertEqual(output["closure_signals"]["state_claim_conflicts"], 1)
+            self.assertEqual(output["closure_signals"]["lifecycle_integrity_issues"], 1)
 
     def test_analyze_requires_subagent_status_only_when_signal_present(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -593,10 +606,31 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertEqual(output["decision"], "block")
-            self.assertEqual(
-                output["reason"],
-                "Reply with only the missing subagent lifecycle line. Do not restate the summary.",
+            self.assertEqual(output["reason"], "Subagent lifecycle is incomplete.")
+
+    def test_stop_allows_closed_subagents_without_visible_lifecycle_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "please implement this feature"}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "function_call", "name": "spawn_agent", "arguments": {"task": "worker"}}, "timestamp": "2026-05-02T00:00:10Z"},
+                    {"payload": {"type": "function_call", "name": "close_agent", "arguments": {"target": "worker"}}, "timestamp": "2026-05-02T00:00:20Z"},
+                ],
             )
+
+            output = _run_stop_hook(
+                {
+                    "transcript_path": str(transcript),
+                    "last_assistant_message": "implemented feature update. verified with targeted review and tests.",
+                }
+            )
+
+            self.assertTrue(output.get("continue"))
+            event = _read_last_observability_event(codex_home, "stop")
+            self.assertEqual(event.get("completion_state", {}).get("subagent_lifecycle_state"), "closed")
 
     def test_stop_allows_heavy_turn_not_used_without_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -706,7 +740,8 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertTrue(output.get("continue"))
             event = _read_last_observability_event(codex_home, "stop")
             self.assertEqual(event.get("status"), "warn")
-            self.assertEqual(event.get("reason"), "acceptance_footer_missing_soft")
+            self.assertEqual(event.get("reason"), "formatting_only_missing_acceptance")
+            self.assertEqual(event.get("completion_state", {}).get("subagent_lifecycle_state"), "not_used")
 
     def test_stop_accepts_natural_acceptance_block(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -736,7 +771,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertTrue(output.get("continue"))
             event = _read_last_observability_event(codex_home, "stop")
             self.assertEqual(event.get("status"), "warn")
-            self.assertEqual(event.get("reason"), "acceptance_natural_block_pass")
+            self.assertEqual(event.get("reason"), "formatting_only_natural_acceptance")
 
     def test_stop_blocks_pass_footer_when_body_says_pytest_not_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -763,10 +798,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertEqual(output["decision"], "block")
-            self.assertEqual(
-                output["reason"],
-                "Reply with only the missing or corrected acceptance footer line(s). Do not restate the summary.",
-            )
+            self.assertEqual(output["reason"], "Verification claim conflicts with the summary.")
 
     def test_stop_blocks_low_risk_footer_when_body_has_remaining_risk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -793,10 +825,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertEqual(output["decision"], "block")
-            self.assertEqual(
-                output["reason"],
-                "Reply with only the missing or corrected acceptance footer line(s). Do not restate the summary.",
-            )
+            self.assertEqual(output["reason"], "Risk claim conflicts with the summary.")
 
     def test_pre_tool_soft_policy_warns_for_broad_scan_without_research_capability(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -269,14 +269,14 @@ if (-not [string]::IsNullOrWhiteSpace(($postPassOutput -join ''))) {
 $stopMissingVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change in the portable kit, updated multiple files, and changed installer behavior for migration."}'
 Assert-JsonField -JsonText $stopMissingVerification -Predicate {
     param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true
-} -Message 'Stop hook should block missing verification while suppressing UI output.'
+    $value.continue -eq $true
+} -Message 'Stop hook should allow user-facing summaries without forcing visible acceptance metadata.'
 
 $stopPartialFooter = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=pass\nreview_status=pass"}'
 Assert-JsonField -JsonText $stopPartialFooter -Predicate {
     param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Acceptance footer is incomplete.'
-} -Message 'Stop hook did not block partial acceptance footer while suppressing UI output.'
+    $value.continue -eq $true
+} -Message 'Stop hook should not block partial acceptance formatting.'
 
 $stopPartialVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=medium；live client validation remains."}'
 Assert-JsonField -JsonText $stopPartialVerification -Predicate {
@@ -287,7 +287,7 @@ Assert-JsonField -JsonText $stopPartialVerification -Predicate {
 $stopLowRiskPartial = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}'
 Assert-JsonField -JsonText $stopLowRiskPartial -Predicate {
     param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Verification and risk status are inconsistent.'
+    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Verification claim conflicts with the summary.'
 } -Message 'Stop hook should block partial verification paired with low risk while suppressing UI output.'
 
 $stopUnsafeGitDirective = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented change.\n:: git-commit{branch=\"main\"}"}'
@@ -320,19 +320,13 @@ Assert-JsonField -JsonText $stopLifecycleOutput -Predicate {
 
 $stopPassPayload = @{
     transcript_path = $transcript
-    last_assistant_message = @'
-implemented the requested change in the portable kit and updated installer behavior. Verification: tests run. Subagents: closed.
-verification_status=pass
-review_status=not_required
-subagent_status=closed
-risk_status=low
-'@
+    last_assistant_message = 'implemented the requested change in the portable kit and updated installer behavior. Verification: tests run.'
 } | ConvertTo-Json -Compress
 $stopPassOutput = Invoke-PythonHook -Script $stopHook -InputJson $stopPassPayload
 Assert-JsonField -JsonText $stopPassOutput -Predicate {
     param($value)
     $value.continue -eq $true
-} -Message 'Stop hook did not pass with verification, lifecycle status, and structured acceptance footer.'
+} -Message 'Stop hook did not pass when lifecycle was clean without visible acceptance fields.'
 
 $structuredAcceptanceMessage = @'
 implemented the requested change in the portable kit and updated installer behavior.

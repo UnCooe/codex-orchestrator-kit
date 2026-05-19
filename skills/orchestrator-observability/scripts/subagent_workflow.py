@@ -418,9 +418,10 @@ def build_report(
     heavy_work_delegation_signals = 0
     broad_scan_bypasses = 0
     broad_scan_blocks = 0
-    soft_acceptance_warnings = 0
-    heuristic_acceptance_passes = 0
-    repair_turn_blocks = 0
+    formatting_only_warnings = 0
+    hidden_lifecycle_successes = 0
+    lifecycle_integrity_issues = 0
+    state_claim_conflicts = 0
 
     for row in facts:
         row_dict = row if isinstance(row, dict) else row.__dict__
@@ -458,19 +459,6 @@ def build_report(
 
         if row_dict.get("assistant_work_done", False):
             closure["work_done_messages"] += 1
-            if row_dict.get("assistant_has_acceptance_footer", False):
-                closure["acceptance_footer_present"] += 1
-            else:
-                closure["work_done_missing_acceptance_footer"] += 1
-            if row_dict.get("assistant_acceptance_footer_complete", False):
-                closure["acceptance_footer_complete"] += 1
-            elif row_dict.get("assistant_has_acceptance_footer", False):
-                closure["acceptance_footer_partial"] += 1
-            if (
-                row_dict.get("acceptance_has_subagent_signal", False)
-                and not row_dict.get("assistant_has_subagent_status", False)
-            ):
-                closure["work_done_missing_subagent_status"] += 1
 
         if event_type == "orchestrator_user_prompt" and str(row_dict.get("reason", "")) == "heavy_prompt_detected":
             heavy_work_delegation_signals += 1
@@ -479,22 +467,24 @@ def build_report(
 
         if event_type == "orchestrator_stop":
             reason = str(row_dict.get("reason", ""))
+            completion_state = row_dict.get("completion_state") if isinstance(row_dict.get("completion_state"), dict) else {}
+            if not completion_state:
+                acceptance_obj = row_dict.get("acceptance") if isinstance(row_dict.get("acceptance"), dict) else {}
+                nested_state = acceptance_obj.get("completion_state") if isinstance(acceptance_obj.get("completion_state"), dict) else {}
+                completion_state = nested_state or {}
+            lifecycle_state = str(completion_state.get("subagent_lifecycle_state") or "")
+            if lifecycle_state == "closed":
+                hidden_lifecycle_successes += 1
             if status == "warn" and reason in {
-                "acceptance_footer_missing_soft",
-                "acceptance_footer_incomplete_soft",
-                "acceptance_review_status_soft",
+                "formatting_only_missing_acceptance",
+                "formatting_only_partial_acceptance",
+                "formatting_only_natural_acceptance",
             }:
-                soft_acceptance_warnings += 1
-            if status == "warn" and reason == "acceptance_natural_block_pass":
-                heuristic_acceptance_passes += 1
-            if status == "blocked" and reason in {
-                "subagent_close_missing",
-                "subagent_lifecycle_missing",
-                "acceptance_footer_subagent_status_reject",
-                "acceptance_footer_verification_fail",
-                "acceptance_footer_risk_fail",
-            }:
-                repair_turn_blocks += 1
+                formatting_only_warnings += 1
+            if status == "blocked" and reason == "subagent_lifecycle_incomplete":
+                lifecycle_integrity_issues += 1
+            if status == "blocked" and reason in {"verification_claim_conflict", "risk_claim_conflict"}:
+                state_claim_conflicts += 1
 
         if (
             event_type == "orchestrator_pre_tool_use"
@@ -574,13 +564,12 @@ def build_report(
         heavy_signal_classification, heavy_signal_sessions, heavy_signal_sessions_with_spawn
     )
     work_done_messages = int(closure.get("work_done_messages", 0))
-    acceptance_issue_count = int(closure.get("work_done_missing_acceptance_footer", 0)) + int(
-        closure.get("work_done_missing_subagent_status", 0)
-    )
+    acceptance_issue_count = formatting_only_warnings
     workflow_issue_count = (
-        int(unclosed_delta > 0)
+        int(lifecycle_integrity_issues > 0 or unclosed_delta > 0)
         + int(broad_scan_bypasses > 0)
         + int(heavy_signal_classification in {"misaligned", "partial"})
+        + int(state_claim_conflicts > 0)
     )
     sample_assessment = _sample_assessment(len(sessions), work_done_messages, spawn_count)
     workflow_policy = _policy_from_issue_count(workflow_issue_count)
@@ -656,16 +645,12 @@ def build_report(
             "lifecycle_delta": unclosed_delta,
             "open_sessions": open_session_count,
             "broad_scan_bypasses": broad_scan_bypasses,
-            "soft_acceptance_warnings": soft_acceptance_warnings,
-            "heuristic_acceptance_passes": heuristic_acceptance_passes,
-            "repair_turn_blocks": repair_turn_blocks,
+            "formatting_only_warnings": formatting_only_warnings,
+            "hidden_lifecycle_successes": hidden_lifecycle_successes,
+            "lifecycle_integrity_issues": lifecycle_integrity_issues,
+            "state_claim_conflicts": state_claim_conflicts,
             "heavy_work_signal_quality": heavy_signal_quality,
             "work_done_messages": work_done_messages,
-            "acceptance_footer_present": int(closure.get("acceptance_footer_present", 0)),
-            "acceptance_footer_complete": int(closure.get("acceptance_footer_complete", 0)),
-            "acceptance_footer_partial": int(closure.get("acceptance_footer_partial", 0)),
-            "work_done_missing_acceptance_footer": int(closure.get("work_done_missing_acceptance_footer", 0)),
-            "work_done_missing_subagent_status": int(closure.get("work_done_missing_subagent_status", 0)),
         },
         "sample_assessment": sample_assessment,
         "tool_calls": dict(tool_calls),
@@ -722,16 +707,13 @@ def build_report(
         f"- Spawn/Wait/Close: {spawn_count}/{wait_count}/{close_count}",
         f"- Unclosed delta: {unclosed_delta}",
         f"- Open sessions with unclosed subagents: {open_session_count}",
-        f"- Repair-turn blocks: {repair_turn_blocks}",
+        f"- Lifecycle integrity issues: {lifecycle_integrity_issues}",
         "",
-        "## Acceptance signals",
+        "## Completion integrity",
         f"- Work-done replies: {work_done_messages}",
-        f"- Acceptance footer complete: {closure.get('acceptance_footer_complete', 0)}",
-        f"- Acceptance footer partial: {closure.get('acceptance_footer_partial', 0)}",
-        f"- Missing acceptance footer on work-done replies: {closure.get('work_done_missing_acceptance_footer', 0)}",
-        f"- Missing subagent lifecycle status on work-done replies: {closure.get('work_done_missing_subagent_status', 0)}",
-        f"- Soft acceptance warnings: {soft_acceptance_warnings}",
-        f"- Heuristic acceptance passes: {heuristic_acceptance_passes}",
+        f"- Hidden lifecycle successes: {hidden_lifecycle_successes}",
+        f"- State-claim conflicts: {state_claim_conflicts}",
+        f"- Formatting-only warnings: {formatting_only_warnings}",
         "",
         "## Delegation signals",
         f"- Delegation rate (spawn / tool calls): {delegation_rate}",
