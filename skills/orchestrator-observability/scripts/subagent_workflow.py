@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -80,9 +81,21 @@ def _project_context_summary(cwd: str, include_paths: bool) -> Dict[str, object]
     except Exception:
         return {"available": False, "source": "invalid_cwd", "summary": ""}
 
-    context_path = root / ".codex" / "project-context.md"
-    if not context_path.exists():
-        source = str(context_path).replace("\\", "/")
+    candidates = [
+        (root / ".codex" / "project-context.md", ".codex/project-context.md"),
+        (root / "AGENTS.md", "AGENTS.md"),
+    ]
+    context_path = None
+    source = ""
+    for path, label in candidates:
+        if path.exists():
+            context_path = path
+            source = str(path).replace("\\", "/")
+            if not include_paths and root.name:
+                source = f"project:{root.name}/{label}"
+            break
+    if context_path is None:
+        source = str(candidates[0][0]).replace("\\", "/")
         if not include_paths and root.name:
             source = f"project:{root.name}/.codex/project-context.md"
         return {"available": False, "source": source, "summary": ""}
@@ -90,18 +103,11 @@ def _project_context_summary(cwd: str, include_paths: bool) -> Dict[str, object]
     try:
         text = context_path.read_text(encoding="utf-8", errors="ignore").strip()
     except Exception:
-        source = str(context_path).replace("\\", "/")
-        if not include_paths and root.name:
-            source = f"project:{root.name}/.codex/project-context.md"
         return {"available": False, "source": source, "summary": ""}
 
     normalized = " ".join(_redact_context(text).replace("\r", "").replace("\n", " ").split())
     if len(normalized) > 240:
         normalized = normalized[:237] + "..."
-
-    source = str(context_path).replace("\\", "/")
-    if not include_paths and root.name:
-        source = f"project:{root.name}/.codex/project-context.md"
 
     return {"available": True, "source": source, "summary": normalized}
 
@@ -236,13 +242,13 @@ def _build_trend_summary(current_report: Dict[str, object], previous_report: Opt
     previous_coverage = round(_safe_get_float(previous_heavy, "session_coverage_rate"), 4) if previous_report else None
 
     metrics = {
-        "lifecycle_delta_spawn_minus_close": _compare_metric(
-            _safe_get_int(current_subagents, "lifecycle_delta_spawn_minus_close"),
-            _safe_get_int(previous_subagents, "lifecycle_delta_spawn_minus_close") if previous_report else None,
+        "unresolved_lifecycle_delta": _compare_metric(
+            _safe_get_int(current_subagents, "unresolved_lifecycle_delta"),
+            _safe_get_int(previous_subagents, "unresolved_lifecycle_delta") if previous_report else None,
         ),
-        "open_sessions": _compare_metric(
-            _safe_get_int(current_subagents, "open_sessions"),
-            _safe_get_int(previous_subagents, "open_sessions") if previous_report else None,
+        "unexplained_open_sessions": _compare_metric(
+            _safe_get_int(current_subagents, "unexplained_open_sessions"),
+            _safe_get_int(previous_subagents, "unexplained_open_sessions") if previous_report else None,
         ),
         "broad_scan_bypasses": _compare_metric(
             _safe_get_int(current_workflow, "broad_scan_bypasses"),
@@ -333,6 +339,12 @@ def _report_classification(
 ) -> str:
     if sample_status == "insufficient":
         return "insufficient_sample"
+    if action_policy == "observe" and heavy_classification not in {"misaligned", "partial"}:
+        if trend_overall == "improving":
+            return "improved"
+        if trend_overall == "stable":
+            return "stable"
+        return "observe"
     if trend_overall == "first_run":
         return "new"
     if trend_overall == "incomparable":
@@ -373,7 +385,7 @@ def _build_visible_summary(
         f"workflow={workflow_policy}; "
         f"acceptance={acceptance_policy}; "
         f"lifecycle_delta={closure_signals.get('lifecycle_delta', 0)}; "
-        f"footer_missing={closure_signals.get('work_done_missing_acceptance_footer', 0)}; "
+        f"unresolved_lifecycle_delta={closure_signals.get('unresolved_lifecycle_delta', 0)}; "
         f"heavy_quality={heavy_work.get('signal_quality', 'unknown')}; class={classification}"
     )
     if sample_status == "insufficient":
@@ -414,9 +426,12 @@ def build_report(
     project_context = {}
     per_session_subagents = defaultdict(lambda: {"spawn_agent": 0, "wait_agent": 0, "close_agent": 0})
     per_session_heavy_signals = Counter()
+    per_session_retained_explanations = Counter()
+    per_session_tool_calls = Counter()
     closure = Counter()
     heavy_work_delegation_signals = 0
     broad_scan_bypasses = 0
+    broad_scan_bypasses_observed = 0
     broad_scan_blocks = 0
     formatting_only_warnings = 0
     hidden_lifecycle_successes = 0
@@ -452,13 +467,24 @@ def build_report(
                     per_session_subagents[session_id]["close_agent"] += 1
 
         if event_type in {"transcript_function_call", "transcript_custom_tool_call"}:
-            tool_calls[str(row_dict.get("tool_name") or row_dict.get("normalized_tool_name") or "unknown")] += 1
+            normalized_tool = str(row_dict.get("normalized_tool_name") or row_dict.get("tool_name") or "unknown")
+            tool_calls[normalized_tool] += 1
+            if session_id:
+                per_session_tool_calls[session_id] += 1
+                if normalized_tool in {"apply_patch", "edit", "write"}:
+                    per_session_heavy_signals[session_id] += 1
+                    heavy_work_delegation_signals += 1
 
         if event_type == "transcript_token_count":
             totals["token_count_events"] += 1
 
         if row_dict.get("assistant_work_done", False):
             closure["work_done_messages"] += 1
+            if session_id and int(row_dict.get("input_length", 0) or 0) >= 1200:
+                per_session_heavy_signals[session_id] += 1
+                heavy_work_delegation_signals += 1
+        if event_type == "transcript_message_assistant" and row_dict.get("assistant_has_subagent_status", False) and session_id:
+            per_session_retained_explanations[session_id] += 1
 
         if event_type == "orchestrator_user_prompt" and str(row_dict.get("reason", "")) == "heavy_prompt_detected":
             heavy_work_delegation_signals += 1
@@ -497,13 +523,14 @@ def build_report(
             and status in {"allow", "warn"}
             and str(row_dict.get("reason")) in {
                 "delegation_signal_detected",
-                "workflow_signal_detected",
                 "broad_scan_without_research_capability",
                 "broad_scan_with_workflow_signal",
                 "broad_scan_with_research_capability",
             }
         ):
-            broad_scan_bypasses += 1
+            broad_scan_bypasses_observed += 1
+            if str(row_dict.get("reason")) == "broad_scan_without_research_capability":
+                broad_scan_bypasses += 1
 
         if len(samples) < max_samples:
             samples.append(
@@ -532,9 +559,18 @@ def build_report(
     legacy_spawn_per_heavy_signal = _safe_divide(spawn_count, max(1, heavy_work_delegation_signals))
 
     open_session_count = 0
-    for stats in per_session_subagents.values():
-        if stats["spawn_agent"] > stats["close_agent"]:
+    unexplained_open_session_count = 0
+    unresolved_lifecycle_delta = 0
+    explained_retained_sessions = 0
+    for session_id, stats in per_session_subagents.items():
+        delta = stats["spawn_agent"] - stats["close_agent"]
+        if delta > 0:
             open_session_count += 1
+            if per_session_retained_explanations.get(session_id, 0) > 0:
+                explained_retained_sessions += 1
+            else:
+                unexplained_open_session_count += 1
+                unresolved_lifecycle_delta += delta
 
     heavy_signal_sessions = 0
     heavy_signal_sessions_with_spawn = 0
@@ -566,7 +602,7 @@ def build_report(
     work_done_messages = int(closure.get("work_done_messages", 0))
     acceptance_issue_count = formatting_only_warnings
     workflow_issue_count = (
-        int(lifecycle_integrity_issues > 0 or unclosed_delta > 0)
+        int(lifecycle_integrity_issues > 0 or unresolved_lifecycle_delta > 0)
         + int(broad_scan_bypasses > 0)
         + int(heavy_signal_classification in {"misaligned", "partial"})
         + int(state_claim_conflicts > 0)
@@ -615,7 +651,10 @@ def build_report(
             "close": close_count,
             "unclosed_delta": unclosed_delta,
             "open_sessions": open_session_count,
+            "unexplained_open_sessions": unexplained_open_session_count,
+            "explained_retained_sessions": explained_retained_sessions,
             "lifecycle_delta_spawn_minus_close": unclosed_delta,
+            "unresolved_lifecycle_delta": unresolved_lifecycle_delta,
             "spawn_per_tool_call": delegation_rate,
             "spawn_per_heavy_signal": avg_spawns_per_signal_session,
             "spawn_per_heavy_signal_legacy": legacy_spawn_per_heavy_signal,
@@ -626,6 +665,7 @@ def build_report(
             "heavy_work_delegation_signals": heavy_work_delegation_signals,
             "broad_scan_blocks": broad_scan_blocks,
             "broad_scan_bypasses": broad_scan_bypasses,
+            "broad_scan_bypasses_observed": broad_scan_bypasses_observed,
             "heavy_work_delegation": {
                 "classification": heavy_signal_classification,
                 "signal_count": heavy_work_delegation_signals,
@@ -643,8 +683,12 @@ def build_report(
         },
         "closure_signals": {
             "lifecycle_delta": unclosed_delta,
+            "unresolved_lifecycle_delta": unresolved_lifecycle_delta,
             "open_sessions": open_session_count,
+            "unexplained_open_sessions": unexplained_open_session_count,
+            "explained_retained_sessions": explained_retained_sessions,
             "broad_scan_bypasses": broad_scan_bypasses,
+            "broad_scan_bypasses_observed": broad_scan_bypasses_observed,
             "formatting_only_warnings": formatting_only_warnings,
             "hidden_lifecycle_successes": hidden_lifecycle_successes,
             "lifecycle_integrity_issues": lifecycle_integrity_issues,
@@ -706,7 +750,10 @@ def build_report(
         "## Workflow health",
         f"- Spawn/Wait/Close: {spawn_count}/{wait_count}/{close_count}",
         f"- Unclosed delta: {unclosed_delta}",
+        f"- Unresolved lifecycle delta: {unresolved_lifecycle_delta}",
         f"- Open sessions with unclosed subagents: {open_session_count}",
+        f"- Explained retained sessions: {explained_retained_sessions}",
+        f"- Unexplained open sessions: {unexplained_open_session_count}",
         f"- Lifecycle integrity issues: {lifecycle_integrity_issues}",
         "",
         "## Completion integrity",
@@ -724,7 +771,8 @@ def build_report(
         f"- Average spawns per heavy-work signal session: {avg_spawns_per_signal_session}",
         f"- Legacy spawn / heavy-work signal ratio: {legacy_spawn_per_heavy_signal}",
         f"- Broad-scan blocks: {broad_scan_blocks}",
-        f"- Broad-scan bypass signals (observed): {broad_scan_bypasses}",
+        f"- Broad-scan bypass signals (triage-worthy): {broad_scan_bypasses}",
+        f"- Broad-scan bypass signals (observed): {broad_scan_bypasses_observed}",
         "",
         "## Trend",
         f"- overall: {data['trend'].get('overall', 'unknown')}",
@@ -783,6 +831,8 @@ def build_report(
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = parse_args()
     output = build_report(
         Path(args.codex_home).expanduser(),

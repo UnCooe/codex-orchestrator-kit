@@ -199,7 +199,13 @@ SESSIONS_ROOT="$CODEX_HOME/sessions"
 mkdir -p "$SESSIONS_ROOT"
 
 TRANSCRIPT_FOR_HOOKS="$SESSIONS_ROOT/hook-events.jsonl"
-SHELL_COMMAND_BLOCK=$(printf '%s' "{\"tool_name\":\"shell_command\",\"tool_input\":{\"command\":\"find .\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
+HOOK_PROJECT="$CODEX_HOME/hook-project"
+mkdir -p "$HOOK_PROJECT/.codex"
+cat > "$HOOK_PROJECT/.codex/review-profile.toml" <<'TOML'
+[workflow_profile]
+pretool_policy = "hard"
+TOML
+SHELL_COMMAND_BLOCK=$(printf '%s' "{\"cwd\":\"$HOOK_PROJECT\",\"tool_name\":\"shell_command\",\"tool_input\":{\"command\":\"find .\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
 "$PYTHON_BIN" - "$SHELL_COMMAND_BLOCK" <<'PY'
 import json
 import sys
@@ -209,7 +215,7 @@ if obj.get("decision") != "block":
     raise SystemExit("shell_command broad scan was not blocked")
 PY
 
-POWERSHELL_BLOCK=$(printf '%s' "{\"tool_name\":\"powershell\",\"tool_input\":{\"command\":\"Get-ChildItem -Recurse\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
+POWERSHELL_BLOCK=$(printf '%s' "{\"cwd\":\"$HOOK_PROJECT\",\"tool_name\":\"powershell\",\"tool_input\":{\"command\":\"Get-ChildItem -Recurse\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
 "$PYTHON_BIN" - "$POWERSHELL_BLOCK" <<'PY'
 import json
 import sys

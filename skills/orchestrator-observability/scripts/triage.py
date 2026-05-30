@@ -207,6 +207,15 @@ def _trend_signal_status(report: Dict, metric: str) -> str:
     return ""
 
 
+def _project_context_available(report: Dict) -> bool:
+    if bool(report.get("project_context_available")):
+        return True
+    project_context = report.get("project_context", {})
+    if not isinstance(project_context, dict):
+        return False
+    return any(isinstance(item, dict) and bool(item.get("available")) for item in project_context.values())
+
+
 def classify(report: Dict) -> Tuple[str, List[str], Dict[str, object]]:
     totals = report.get("totals", {}) if isinstance(report.get("totals", {}), dict) else {}
     subagents = report.get("subagents", {}) if isinstance(report.get("subagents", {}), dict) else {}
@@ -218,19 +227,20 @@ def classify(report: Dict) -> Tuple[str, List[str], Dict[str, object]]:
     missing_verification = _to_int(acceptance.get("work_done_missing_verification", 0))
     missing_subagent_status = _to_int(acceptance.get("work_done_missing_subagent_status", 0))
     missing_footer = _to_int(acceptance.get("work_done_missing_acceptance_footer", 0))
+    missing_acceptance_signal = _to_int(acceptance.get("work_done_missing_acceptance_signal", missing_footer))
     partial_footer = _to_int(acceptance.get("acceptance_footer_partial", 0))
 
     privacy_leak, privacy_hits = _scan_for_privacy_leak(report)
     automation_failure = _contains_automation_failure_marker(report)
     high_block_ratio = orchestrator_events >= 4 and blocked_ratio >= 0.3
-    repeat_acceptance_blocks = (missing_verification + missing_subagent_status + missing_footer + partial_footer) >= 3 or lifecycle_delta >= 3
+    repeat_acceptance_blocks = (missing_verification + missing_subagent_status + missing_acceptance_signal + partial_footer) >= 3 or lifecycle_delta >= 3
     high_close_delta = lifecycle_delta >= 4
     severe_signal = high_block_ratio or repeat_acceptance_blocks or high_close_delta
     trend_overall = _trend_overall(report) or "unknown"
     blocked_ratio_trend = _trend_signal_status(report, "blocked_ratio_x10000")
-    acceptance_trend = _trend_signal_status(report, "work_done_missing_acceptance_footer")
+    acceptance_trend = _trend_signal_status(report, "work_done_missing_acceptance_signal") or _trend_signal_status(report, "work_done_missing_acceptance_footer")
     lifecycle_trend = _trend_signal_status(report, "lifecycle_delta_spawn_minus_close")
-    project_context_available = bool(report.get("project_context_available"))
+    project_context_available = _project_context_available(report)
     actionable = _actionable_suggestions(report)
     classification = "repeated"
     if trend_overall == "first_run":
@@ -252,6 +262,7 @@ def classify(report: Dict) -> Tuple[str, List[str], Dict[str, object]]:
         "work_done_missing_verification": missing_verification,
         "work_done_missing_subagent_status": missing_subagent_status,
         "work_done_missing_acceptance_footer": missing_footer,
+        "work_done_missing_acceptance_signal": missing_acceptance_signal,
         "acceptance_footer_partial": partial_footer,
         "privacy_hit_count": privacy_hits,
         "automation_failure_marker": automation_failure,
@@ -275,8 +286,8 @@ def classify(report: Dict) -> Tuple[str, List[str], Dict[str, object]]:
         reasons = ["high_risk"]
         if high_block_ratio and blocked_ratio_trend in {"first_observation", "worsened"}:
             reasons.append("blocked_ratio_worsening")
-        if (missing_footer > 0 or partial_footer > 0) and acceptance_trend in {"first_observation", "worsened"}:
-            reasons.append("acceptance_footer_regression")
+        if (missing_acceptance_signal > 0 or partial_footer > 0) and acceptance_trend in {"first_observation", "worsened"}:
+            reasons.append("acceptance_signal_regression")
         if lifecycle_delta > 0 and lifecycle_trend in {"first_observation", "worsened"}:
             reasons.append("subagent_lifecycle_regression")
         return "high", reasons, flags

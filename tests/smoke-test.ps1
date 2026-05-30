@@ -306,8 +306,7 @@ if ($hooksJsonBytes.Length -ge 3 -and $hooksJsonBytes[0] -eq 0xEF -and $hooksJso
 $transcript = Join-Path $CodexHome 'transcript-subagent.jsonl'
 $transcriptContent = @(
     '{"payload":{"type":"message","role":"user","content":"implement a feature"}}',
-    '{"payload":{"name":"spawn_agent"}}',
-    '{"payload":{"name":"close_agent"}}'
+    '{"payload":{"name":"spawn_agent"}}'
 ) -join "`n"
 [System.IO.File]::WriteAllText($transcript, $transcriptContent, [System.Text.UTF8Encoding]::new($false))
 
@@ -317,6 +316,13 @@ Assert-JsonField -JsonText $stopLifecycleOutput -Predicate {
     param($value)
     $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Subagent lifecycle is incomplete.'
 } -Message 'Stop hook should block missing subagent lifecycle while suppressing UI output.'
+
+$transcriptContent = @(
+    '{"payload":{"type":"message","role":"user","content":"implement a feature"}}',
+    '{"payload":{"name":"spawn_agent"}}',
+    '{"payload":{"name":"close_agent"}}'
+) -join "`n"
+[System.IO.File]::WriteAllText($transcript, $transcriptContent, [System.Text.UTF8Encoding]::new($false))
 
 $stopPassPayload = @{
     transcript_path = $transcript

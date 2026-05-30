@@ -87,6 +87,55 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
         output = _run_user_prompt_hook({"prompt": "what is 2+2?"})
         self.assertEqual(output, {})
 
+    def test_stop_allows_missing_visible_acceptance_footer_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "stop.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "make the change"}, "timestamp": "2026-05-02T00:00:00Z"},
+                ],
+            )
+            payload = {
+                "transcript_path": str(transcript),
+                "last_assistant_message": "Implemented the requested workflow change. Verification: ran the focused unit test.",
+            }
+
+            output = _run_stop_hook(payload)
+
+            self.assertEqual(output, {"continue": True})
+            event = _read_last_observability_event(codex_home, "stop")
+            self.assertEqual(event.get("reason"), "formatting_only_missing_acceptance")
+
+    def test_stop_allows_retained_subagent_reason_when_spawn_outnumbers_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "retained.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "implement and test"}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "function_call", "name": "spawn_agent", "arguments": {"task": "review"}}, "timestamp": "2026-05-02T00:01:00Z"},
+                ],
+            )
+            payload = {
+                "transcript_path": str(transcript),
+                "last_assistant_message": (
+                    "Implemented the change. Verification: ran focused tests.\n"
+                    "verification_status=pass\n"
+                    "review_status=pass\n"
+                    "subagent_status=retained because the reviewer is continuing the next-turn audit\n"
+                    "risk_status=low"
+                ),
+            }
+
+            output = _run_stop_hook(payload)
+
+            self.assertEqual(output, {"continue": True})
+            event = _read_last_observability_event(codex_home, "stop")
+            self.assertNotEqual(event.get("reason"), "subagent_lifecycle_incomplete")
+
     def test_detect_session_id_normalizes_rollout_filename(self) -> None:
         session_id = _detect_session_id(
             "/tmp/.codex/sessions/2026/05/15/rollout-2026-05-15T20-13-49-019e2668-493a-73c1-ba3c-391cbc8664bc.jsonl"
@@ -493,7 +542,8 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             )
 
             self.assertEqual(output["workflow_signals"]["broad_scan_blocks"], 1)
-            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 1)
+            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses_observed"], 1)
+            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 0)
 
     def test_subagent_workflow_reports_completion_integrity_signals(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -901,6 +951,219 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertEqual(infer_capability("aiserver-implementer", {"cwd": str(repo)}), "implementation")
             self.assertEqual(infer_capability("aiserver-reviewer", {"cwd": str(repo)}), "review")
             self.assertEqual(infer_capability("aiserver-test-writer", {"cwd": str(repo)}), "test_design")
+
+    def test_analyze_uses_agents_md_as_project_context_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            project = Path(temp_dir) / "repo"
+            project.mkdir()
+            (project / "AGENTS.md").write_text("Project context from AGENTS.md", encoding="utf-8")
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "context.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"type": "session_meta", "payload": {"id": "ctx", "cwd": str(project)}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "Implemented context fallback. Verification: unit test.",
+                        },
+                        "timestamp": "2026-05-02T00:01:00Z",
+                    },
+                ],
+            )
+
+            output = build_report(codex_home, since_days=30, report_id="context", max_samples=5, reports_dir=str(reports_root))
+
+            context = output["project_context"]["project:repo"]
+            self.assertTrue(context["available"])
+            self.assertEqual(context["source"], "project:repo/AGENTS.md")
+            self.assertTrue(output["project_context_available"])
+
+    def test_triage_reads_project_context_from_analyzer_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            project = Path(temp_dir) / "repo"
+            project.mkdir()
+            (project / "AGENTS.md").write_text("Project context from AGENTS.md", encoding="utf-8")
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "context.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"type": "session_meta", "payload": {"id": "ctx", "cwd": str(project)}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "message", "role": "assistant", "content": "Nothing to change here."}, "timestamp": "2026-05-02T00:01:00Z"},
+                ],
+            )
+            output = build_report(codex_home, since_days=30, report_id="context-triage", max_samples=5, reports_dir=str(reports_root))
+            report = json.loads(Path(output["json_report"]).read_text(encoding="utf-8"))
+
+            severity, reasons, flags = classify(report)
+
+            self.assertTrue(flags["project_context_available"])
+            self.assertEqual(severity, "none")
+            self.assertNotEqual(reasons, ["setup_debt"])
+
+    def test_analyze_prefers_visible_acceptance_signal_over_footer_adoption(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "signal.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "Implemented reporting change. Verification: ran unit tests.",
+                        },
+                        "timestamp": "2026-05-02T00:00:00Z",
+                    }
+                ],
+            )
+
+            output = build_report(codex_home, since_days=30, report_id="signal", max_samples=5, reports_dir=str(reports_root))
+
+            self.assertEqual(output["acceptance"]["work_done_missing_acceptance_footer"], 1)
+            self.assertEqual(output["acceptance"]["work_done_acceptance_signal_complete"], 1)
+            self.assertEqual(output["acceptance_signal_adoption"]["status"], "healthy")
+
+    def test_subagent_workflow_treats_intentional_broad_scan_bypass_as_observed_not_triage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            events = codex_home / "orchestrator-observability" / "events" / "2026-05-02.jsonl"
+            _write_jsonl(
+                events,
+                [
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "pre_tool_use",
+                        "status": "allow",
+                        "reason": "broad_scan_with_research_capability",
+                        "tool_name": "shell_command",
+                        "timestamp": "2026-05-02T00:00:00Z",
+                    }
+                ],
+            )
+
+            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="broad", max_samples=5, reports_dir=str(reports_root))
+
+            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses_observed"], 1)
+            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 0)
+            self.assertEqual(output["workflow_policy"], "observe")
+
+    def test_subagent_workflow_does_not_count_plain_workflow_signal_as_broad_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            events = codex_home / "orchestrator-observability" / "events" / "2026-05-02.jsonl"
+            _write_jsonl(
+                events,
+                [
+                    {
+                        "event": "orchestrator_observability",
+                        "event_name": "pre_tool_use",
+                        "status": "allow",
+                        "reason": "workflow_signal_detected",
+                        "tool_name": "shell_command",
+                        "timestamp": "2026-05-02T00:00:00Z",
+                    }
+                ],
+            )
+
+            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="plain-workflow", max_samples=5, reports_dir=str(reports_root))
+
+            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses_observed"], 0)
+            self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 0)
+
+    def test_subagent_workflow_explained_retained_session_does_not_classify_worse(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            reports_root.mkdir(parents=True, exist_ok=True)
+            previous = {
+                "generated_at": "2026-05-01T00:00:00Z",
+                "report_name": "subagent-workflow-prev.json",
+                "report_type": "subagent_workflow",
+                "since_days": 30,
+                "paths_included": False,
+                "subagents": {"unresolved_lifecycle_delta": 0, "unexplained_open_sessions": 0},
+                "workflow_signals": {
+                    "broad_scan_bypasses": 0,
+                    "heavy_work_delegation": {
+                        "signal_sessions_without_spawn": 0,
+                        "session_coverage_rate": 0.0,
+                    },
+                },
+            }
+            (reports_root / "subagent-workflow-prev.json").write_text(json.dumps(previous), encoding="utf-8")
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "retained.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "message", "role": "user", "content": "review this"}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "function_call", "name": "spawn_agent", "arguments": {"task": "review"}}, "timestamp": "2026-05-02T00:01:00Z"},
+                    {
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "Review started.\nsubagent_status=retained because it continues next turn.",
+                        },
+                        "timestamp": "2026-05-02T00:02:00Z",
+                    },
+                ],
+            )
+
+            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="retained", max_samples=5, reports_dir=str(reports_root))
+
+            self.assertEqual(output["subagents"]["unresolved_lifecycle_delta"], 0)
+            self.assertEqual(output["workflow_policy"], "observe")
+            self.assertNotEqual(output["classification"], "worse")
+
+    def test_pre_tool_hard_policy_message_mentions_researcher_subagent_and_exception_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "repo"
+            profile = project / ".codex" / "review-profile.toml"
+            profile.parent.mkdir(parents=True)
+            profile.write_text("[workflow_profile]\npretool_policy = \"hard\"\n", encoding="utf-8")
+
+            output = _run_pre_tool_hook(
+                {
+                    "cwd": str(project),
+                    "tool_name": "shell_command",
+                    "tool_input": {"command": "rg --files"},
+                }
+            )
+
+            self.assertIn("researcher subagent", output)
+            self.assertIn("state the exception", output)
+
+    def test_analyze_large_outputs_are_counted_without_raw_blob(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "large.jsonl"
+            raw_blob = "X" * 60050
+            _write_jsonl(
+                transcript,
+                [
+                    {"payload": {"type": "function_call_output", "output": raw_blob}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "custom_tool_call_output", "output": raw_blob}, "timestamp": "2026-05-02T00:01:00Z"},
+                ],
+            )
+
+            output = build_report(codex_home, since_days=30, report_id="large", max_samples=5, reports_dir=str(reports_root))
+            report_text = (reports_root / "orchestrator-observability-large.json").read_text(encoding="utf-8")
+
+            self.assertEqual(output["noise"]["large_tool_outputs"], 2)
+            self.assertEqual(output["noise"]["large_function_outputs"], 1)
+            self.assertEqual(output["noise"]["large_custom_tool_outputs"], 1)
+            self.assertEqual(output["noise"]["large_output_by_project"]["unknown"], 2)
+            self.assertNotIn(raw_blob, report_text)
 
 
 if __name__ == "__main__":

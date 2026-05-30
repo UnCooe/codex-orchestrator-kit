@@ -28,7 +28,8 @@ When not delegating a non-trivial task, state the reason briefly.
 
 ## Delegation Patterns
 
-Use available built-in subagent types when the runtime exposes them. If custom agents are not loaded, use the closest built-in type and put the role contract directly in the prompt:
+Use available built-in subagent types when the runtime exposes them and the current runtime permits spawning. If the runtime requires explicit user authorization for subagents and authorization is not present, state that exception briefly and keep the main thread on low-noise tool execution and acceptance.
+If custom agents are not loaded, use the closest built-in type and put the role contract directly in the prompt:
 - `researcher`: use `researcher`/`explorer` for read-only repo or documentation exploration.
 - `implementer`: use `implementer`/`worker` for targeted code changes with an explicit write scope.
 - `test_designer`: use `test_designer` for independent test cases, edge cases, and acceptance criteria.

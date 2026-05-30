@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -89,16 +90,24 @@ def _project_context_summary(cwd: str, include_paths: bool) -> Dict[str, object]
     except Exception:
         return {"available": False, "source": "invalid_cwd", "summary": ""}
 
-    source = str(root / ".codex" / "project-context.md").replace("\\", "/")
-    display_source = source if include_paths else "project/.codex/project-context.md"
-    if not include_paths and root.name:
-        display_source = f"project:{root.name}/.codex/project-context.md"
+    candidates = [
+        (root / ".codex" / "project-context.md", ".codex/project-context.md"),
+        (root / "AGENTS.md", "AGENTS.md"),
+    ]
+    context_path = None
+    display_source = ""
+    for path, label in candidates:
+        if path.exists():
+            context_path = path
+            display_source = str(path).replace("\\", "/") if include_paths else f"project:{root.name}/{label}"
+            break
 
-    if not (root / ".codex" / "project-context.md").exists():
+    if context_path is None:
+        display_source = f"project:{root.name}/.codex/project-context.md" if not include_paths and root.name else str(candidates[0][0]).replace("\\", "/")
         return {"available": False, "source": display_source, "summary": ""}
 
     try:
-        text = (root / ".codex" / "project-context.md").read_text(encoding="utf-8", errors="ignore")
+        text = context_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return {"available": False, "source": display_source, "summary": ""}
 
@@ -128,8 +137,8 @@ def _build_suggestions(
         suggestions.append("Require explicit verification in final assistant messages before Stop.")
     if acceptance.get("work_done_missing_subagent_status", 0) > 0:
         suggestions.append("Require subagent lifecycle status in final assistant messages when subagents were used.")
-    if acceptance.get("work_done_missing_acceptance_footer", 0) > 0:
-        suggestions.append("Require the full four-field acceptance footer when work was done.")
+    if acceptance.get("work_done_missing_acceptance_signal", 0) > 0:
+        suggestions.append("Require a user-visible verification summary before Stop; do not require a machine-only footer.")
     if acceptance.get("acceptance_footer_partial", 0) > 0:
         suggestions.append("Acceptance footers are present but incomplete; fill all four footer fields.")
     if acceptance.get("structured_acceptance_missing_verification", 0) > 0:
@@ -228,6 +237,10 @@ def _build_trend_summary(current_report: Dict[str, object], previous_report: Opt
         "work_done_missing_acceptance_footer": _compare_metric(
             _safe_get_int(current_acceptance, "work_done_missing_acceptance_footer"),
             _safe_get_int(previous_acceptance, "work_done_missing_acceptance_footer") if previous_report else None,
+        ),
+        "work_done_missing_acceptance_signal": _compare_metric(
+            _safe_get_int(current_acceptance, "work_done_missing_acceptance_signal"),
+            _safe_get_int(previous_acceptance, "work_done_missing_acceptance_signal") if previous_report else None,
         ),
         "acceptance_footer_partial": _compare_metric(
             _safe_get_int(current_acceptance, "acceptance_footer_partial"),
@@ -331,6 +344,30 @@ def _build_footer_adoption_summary(acceptance: Dict[str, int], trend: Dict[str, 
     }
 
 
+def _build_acceptance_signal_summary(acceptance: Dict[str, int], trend: Dict[str, object]) -> Dict[str, object]:
+    work_done = _safe_get_int(acceptance, "work_done_messages")
+    complete = _safe_get_int(acceptance, "work_done_acceptance_signal_complete")
+    missing = _safe_get_int(acceptance, "work_done_missing_acceptance_signal")
+    coverage = _safe_ratio(complete, work_done)
+    missing_rate = _safe_ratio(missing, work_done)
+    trend_signals = trend.get("signals", []) if isinstance(trend, dict) else []
+    signal = next(
+        (item for item in trend_signals if isinstance(item, dict) and item.get("metric") == "work_done_missing_acceptance_signal"),
+        {},
+    )
+    summary = f"acceptance_signal={complete}/{work_done} ({coverage}); missing={missing} ({missing_rate})"
+    return {
+        "work_done_messages": work_done,
+        "complete": complete,
+        "missing": missing,
+        "coverage_rate": coverage,
+        "missing_rate": missing_rate,
+        "status": _footer_adoption_status(coverage),
+        "trend_status": str(signal.get("status") or "unknown"),
+        "summary": summary,
+    }
+
+
 def _build_visible_summary(
     totals: Dict[str, int],
     acceptance: Dict[str, int],
@@ -342,16 +379,17 @@ def _build_visible_summary(
     total = _safe_get_int(totals, "orchestrator_events")
     blocked_ratio = _safe_ratio(blocked, total)
     lifecycle_delta = _safe_get_int(subagents, "lifecycle_delta_spawn_minus_close")
-    footer_status = str(footer_adoption.get("status") or "unknown")
+    acceptance_status = str(footer_adoption.get("status") or "unknown")
+    acceptance_missing = _safe_get_int(acceptance, "work_done_missing_acceptance_signal")
     trend_overall = str(trend.get("overall") or "unknown")
     first_line = "Orchestrator 自动复盘：high" if (
-        lifecycle_delta > 0 or footer_adoption.get("missing", 0) > 0 or blocked > 0
+        lifecycle_delta > 0 or acceptance_missing > 0 or blocked > 0
     ) else "Orchestrator 自动复盘：none"
     why_it_matters = (
-        f"footer={footer_status} {footer_adoption.get('complete', 0)}/{footer_adoption.get('work_done_messages', 0)}; "
+        f"acceptance={acceptance_status} {footer_adoption.get('complete', 0)}/{footer_adoption.get('work_done_messages', 0)}; "
         f"lifecycle_delta={lifecycle_delta}; blocked_ratio={blocked_ratio}; trend={trend_overall}"
     )
-    next_action = "tighten workflow closure and footer adoption" if first_line.endswith("high") else "continue observe"
+    next_action = "tighten workflow closure and visible verification" if first_line.endswith("high") else "continue observe"
     return {
         "first_line": first_line,
         "why_it_matters": why_it_matters,
@@ -381,6 +419,8 @@ def build_report(
     acceptance = Counter()
     structured_acceptance = Counter()
     noise = Counter()
+    large_output_by_project = Counter()
+    large_output_by_tool = Counter()
     token_snapshots: List[Dict] = []
     sessions = set()
     samples: List[Dict] = []
@@ -473,6 +513,8 @@ def build_report(
             output_len = int(row_dict.get("output_length", 0) or 0)
             if output_len >= 60000:
                 noise["large_tool_outputs"] += 1
+                large_output_by_project[project] += 1
+                large_output_by_tool[str(row_dict.get("normalized_tool_name") or row_dict.get("tool_name") or "unknown")] += 1
                 if event_type == "transcript_function_call_output":
                     noise["large_function_outputs"] += 1
                 else:
@@ -515,6 +557,14 @@ def build_report(
                 acceptance["work_done_missing_acceptance_footer"] += 1
             if row_dict.get("assistant_work_done", False) and row_dict.get("assistant_has_verification", False) and not row_dict.get("assistant_acceptance_footer_complete", False):
                 acceptance["heuristic_only_completion"] += 1
+            if row_dict.get("assistant_work_done", False):
+                has_visible_verification = bool(row_dict.get("assistant_has_verification", False))
+                needs_subagent_status = bool(row_dict.get("acceptance_has_subagent_signal", False))
+                has_required_subagent_status = not needs_subagent_status or bool(row_dict.get("assistant_has_subagent_status", False))
+                if has_visible_verification and has_required_subagent_status:
+                    acceptance["work_done_acceptance_signal_complete"] += 1
+                else:
+                    acceptance["work_done_missing_acceptance_signal"] += 1
         if len(samples) < max_samples:
             samples.append(
                 {
@@ -576,8 +626,15 @@ def build_report(
         },
         "acceptance": dict(acceptance),
         "structured_acceptance": dict(structured_acceptance),
-        "noise": dict(noise),
+        "noise": {
+            **dict(noise),
+            "large_output_by_project": dict(large_output_by_project),
+            "large_output_by_tool": dict(large_output_by_tool),
+        },
         "project_context": project_context,
+        "project_context_available": any(
+            isinstance(item, dict) and bool(item.get("available")) for item in project_context.values()
+        ),
         "token_snapshots": token_snapshots,
         "samples": samples,
         "facts": facts_for_report,
@@ -585,12 +642,13 @@ def build_report(
     previous_report = _load_previous_report(reports_root, report_id)
     data["trend"] = _build_trend_summary(data, previous_report)
     data["footer_adoption"] = _build_footer_adoption_summary(data["acceptance"], data["trend"])
+    data["acceptance_signal_adoption"] = _build_acceptance_signal_summary(data["acceptance"], data["trend"])
     data["visible_summary"] = _build_visible_summary(
         data["totals"],
         data["acceptance"],
         data["subagents"],
         data["trend"],
-        data["footer_adoption"],
+        data["acceptance_signal_adoption"],
     )
     data["suggestions"] = _build_suggestions(
         data["totals"],
@@ -628,11 +686,18 @@ def build_report(
         f"- Large tool outputs: {noise.get('large_tool_outputs', 0)}",
         f"- Acceptance footer complete: {acceptance.get('acceptance_footer_complete', 0)}",
         f"- Acceptance footer missing on work-done replies: {acceptance.get('work_done_missing_acceptance_footer', 0)}",
+        f"- Acceptance signal complete: {acceptance.get('work_done_acceptance_signal_complete', 0)}",
+        f"- Acceptance signal missing on work-done replies: {acceptance.get('work_done_missing_acceptance_signal', 0)}",
         "",
         "## Footer adoption",
         f"- summary: {data['footer_adoption']['summary']}",
         f"- status: {data['footer_adoption']['status']}",
         f"- trend_status: {data['footer_adoption']['trend_status']}",
+        "",
+        "## Acceptance signal adoption",
+        f"- summary: {data['acceptance_signal_adoption']['summary']}",
+        f"- status: {data['acceptance_signal_adoption']['status']}",
+        f"- trend_status: {data['acceptance_signal_adoption']['trend_status']}",
         "",
         "## Orchestrator events",
     ]
@@ -719,14 +784,19 @@ def build_report(
         "orchestrator_event_breakdown": {k: v for k, v in event_breakdown.items()},
         "subagents": dict(subagents),
         "acceptance": dict(acceptance),
-        "noise": dict(noise),
+        "noise": data["noise"],
         "trend": data["trend"],
         "footer_adoption": data["footer_adoption"],
+        "acceptance_signal_adoption": data["acceptance_signal_adoption"],
+        "project_context": data["project_context"],
+        "project_context_available": data["project_context_available"],
         "visible_summary": data["visible_summary"],
     }
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = parse_args()
     output = build_report(
         Path(args.codex_home).expanduser(),
