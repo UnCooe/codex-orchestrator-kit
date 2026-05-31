@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,20 @@ def _run_pre_tool_hook(payload: dict) -> str:
         text=True,
         capture_output=True,
         check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _run_pre_tool_hook_with_env(payload: dict, env: dict[str, str]) -> str:
+    merged_env = os.environ.copy()
+    merged_env.update(env)
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS / "orchestrator_pre_tool_use.py")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+        env=merged_env,
     )
     return proc.stdout.strip()
 
@@ -141,6 +156,50 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             "/tmp/.codex/sessions/2026/05/15/rollout-2026-05-15T20-13-49-019e2668-493a-73c1-ba3c-391cbc8664bc.jsonl"
         )
         self.assertEqual(session_id, "019e2668-493a-73c1-ba3c-391cbc8664bc")
+
+    def test_observability_event_redacts_paths_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            project = Path(temp_dir) / "repo"
+            project.mkdir()
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "pre.jsonl"
+            output = _run_pre_tool_hook(
+                {
+                    "cwd": str(project),
+                    "transcript_path": str(transcript),
+                    "tool_name": "bash",
+                    "tool_input": {"command": "echo hi"},
+                }
+            )
+
+            self.assertEqual(output, "")
+            event = _read_last_observability_event(codex_home, "pre_tool_use")
+            self.assertEqual(event.get("cwd"), "project:repo")
+            self.assertEqual(event.get("transcript_path"), "session:pre")
+            event_text = json.dumps(event)
+            self.assertNotIn(str(project), event_text)
+            self.assertNotIn(str(transcript), event_text)
+
+    def test_observability_include_paths_env_preserves_raw_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            project = Path(temp_dir) / "repo"
+            project.mkdir()
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "pre.jsonl"
+            output = _run_pre_tool_hook_with_env(
+                {
+                    "cwd": str(project),
+                    "transcript_path": str(transcript),
+                    "tool_name": "bash",
+                    "tool_input": {"command": "echo hi"},
+                },
+                {"ORCHESTRATOR_OBSERVABILITY_INCLUDE_PATHS": "1"},
+            )
+
+            self.assertEqual(output, "")
+            event = _read_last_observability_event(codex_home, "pre_tool_use")
+            self.assertEqual(event.get("cwd"), str(project))
+            self.assertEqual(event.get("transcript_path"), str(transcript))
 
     def test_extract_facts_marks_partial_acceptance_footer(self) -> None:
         cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
@@ -981,6 +1040,55 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
             self.assertTrue(context["available"])
             self.assertEqual(context["source"], "project:repo/AGENTS.md")
             self.assertTrue(output["project_context_available"])
+
+    def test_analyze_include_paths_opt_in_preserves_raw_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            project = Path(temp_dir) / "repo"
+            project.mkdir()
+            (project / "AGENTS.md").write_text("Project context from AGENTS.md", encoding="utf-8")
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "context.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"type": "session_meta", "payload": {"id": "ctx", "cwd": str(project)}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "message", "role": "assistant", "content": "Implemented context fallback. Verification: unit test."}, "timestamp": "2026-05-02T00:01:00Z"},
+                ],
+            )
+
+            output = build_report(codex_home, since_days=30, report_id="context-paths", max_samples=5, reports_dir=str(reports_root), include_paths=True)
+
+            report = json.loads(Path(output["json_report"]).read_text(encoding="utf-8"))
+            self.assertTrue(report["paths_included"])
+            self.assertEqual(report["codex_home"], str(codex_home))
+            self.assertIn(str(project), report["cwds"])
+            self.assertEqual(report["project_context"][str(project)]["source"], str(project / "AGENTS.md").replace("\\", "/"))
+
+    def test_subagent_workflow_include_paths_opt_in_preserves_raw_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            project = Path(temp_dir) / "repo"
+            project.mkdir()
+            (project / "AGENTS.md").write_text("Project context from AGENTS.md", encoding="utf-8")
+            reports_root = codex_home / "orchestrator-observability" / "reports"
+            transcript = codex_home / "sessions" / "2026" / "05" / "02" / "workflow.jsonl"
+            _write_jsonl(
+                transcript,
+                [
+                    {"type": "session_meta", "payload": {"id": "ctx", "cwd": str(project)}, "timestamp": "2026-05-02T00:00:00Z"},
+                    {"payload": {"type": "function_call", "name": "spawn_agent", "arguments": {"task": "review"}}, "timestamp": "2026-05-02T00:01:00Z"},
+                    {"payload": {"type": "function_call", "name": "close_agent", "arguments": {}}, "timestamp": "2026-05-02T00:02:00Z"},
+                ],
+            )
+
+            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="workflow-paths", max_samples=5, reports_dir=str(reports_root), include_paths=True)
+
+            report = json.loads(Path(output["json_report"]).read_text(encoding="utf-8"))
+            self.assertTrue(report["paths_included"])
+            self.assertEqual(report["codex_home"], str(codex_home))
+            self.assertIn(str(project), report["cwds"])
+            self.assertEqual(report["project_context"][str(project)]["source"], str(project / "AGENTS.md").replace("\\", "/"))
 
     def test_triage_reads_project_context_from_analyzer_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

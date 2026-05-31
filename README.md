@@ -1,5 +1,12 @@
 # Codex Orchestrator Kit (portable)
 
+Status: experimental, unofficial Codex runtime harness for advanced users.
+
+This project is not an official Codex product or a stable public runtime API.
+It installs local hooks, skills, and agent role files into a Codex runtime home
+only when you pass an explicit apply flag. Run the default dry-run first and
+read the install plan before writing to your main Codex environment.
+
 This repository is a harness for Codex subagent workflow, not a business-project framework.
 Its job is to keep Agent delegation, execution, acceptance, and closure predictable enough to review, trust, and correct.
 
@@ -101,16 +108,21 @@ This harness is successful when recurring review can explain whether the workflo
 - `install-reviewer-pack.ps1` / `install-reviewer-pack.sh`
 - `register-project.ps1` / `register-project.sh`
 - `install.ps1` / `uninstall.ps1` (Windows-first)
-- `install.sh` (best-effort Unix-like)
+- `install.sh` / `uninstall.sh` (best-effort Unix-like)
 - `tests/fixtures/*` sample inputs for hook behavior validation
 
 ## Install
+
+Default install commands are dry-run only and do not write files. Apply mode
+requires an explicit runtime surface selection, including an explicit `auto`
+when you want auto-detection.
 
 Windows (PowerShell):
 
 ```
 cd C:\Users\...\codex-orchestrator-kit
 ./install.ps1
+./install.ps1 -Apply -HookMode auto -SkillsMode auto
 ```
 
 The installer writes Codex hook and agent files into `%CODEX_HOME%` when set, otherwise `%HOME%/.codex`.
@@ -127,9 +139,10 @@ Set custom homes:
 $env:CODEX_HOME = 'D:\MyCodexHome'
 $env:AGENTS_HOME = 'D:\MyAgentsHome'
 ./install.ps1 -CodexHome $env:CODEX_HOME -AgentsHome $env:AGENTS_HOME
+./install.ps1 -CodexHome $env:CODEX_HOME -AgentsHome $env:AGENTS_HOME -Apply -HookMode hooks_json -SkillsMode agents
 ```
 
-Dry run (no file writes):
+Dry run is the default. `-DryRun` is kept as an explicit compatibility alias:
 
 ```
 ./install.ps1 -DryRun
@@ -139,13 +152,15 @@ Unix-like:
 
 ```
 ./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents
+./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents --apply --hook-mode auto --skills-mode auto
 ```
 
 Explicit runtime selection:
 
 ```bash
 ./install.sh --codex-home /path/to/.codex --hook-mode config_toml --skills-mode codex
-./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents --hook-mode hooks_json --skills-mode agents
+./install.sh --codex-home /path/to/.codex --hook-mode config_toml --skills-mode codex --apply
+./install.sh --codex-home /path/to/.codex --agents-home /path/to/.agents --hook-mode hooks_json --skills-mode agents --apply
 ```
 
 ## Uninstall
@@ -154,6 +169,12 @@ Windows:
 
 ```
 ./uninstall.ps1
+```
+
+Unix-like:
+
+```
+./uninstall.sh --codex-home /path/to/.codex --agents-home /path/to/.agents --hook-mode auto --skills-mode auto
 ```
 
 The uninstall removes orchestrator hook/agent/skill files and strips orchestrator hook entries from `hooks.json`. In `config.toml` mode it removes the managed hook block instead.
@@ -165,6 +186,33 @@ The uninstall removes orchestrator hook/agent/skill files and strips orchestrato
 - The harness supports both `hooks.json + ~/.agents/skills` and `config.toml + ~/.codex/skills`.
 - Existing `hooks.json` is preserved via backup and merged when possible. Existing `config.toml` is preserved and updated through a managed block.
 - Each overwritten file is backed up with a timestamped `.bak.*` suffix.
+
+## Support matrix
+
+- Windows PowerShell: primary supported path.
+- Unix-like Bash: best-effort support covered by smoke tests.
+- Python: 3.11 or newer is required for `tomllib` and CI parity.
+- Codex runtime surfaces: local `hooks.json` and `config.toml` layouts are
+  supported as current local runtime surfaces, not as a guaranteed public API.
+
+## Rollback and local data
+
+Installers are backup-oriented, not fully transactional. If an unexpected
+failure happens mid-install, inspect the timestamped `.bak.*` files next to the
+modified target, then either restore the backup manually or rerun uninstall and
+install against the intended target home.
+
+Do not commit or attach local generated runtime data:
+
+- `.codex/sessions/`
+- `.codex/orchestrator-observability/`
+- generated reports, triage state, proposal patches, and local backups
+- real project `.codex/project-context.md` or `.codex/review-profile.toml`
+- project-specific reviewer packs that contain private context
+
+Distributed source files use synthetic fixture paths and synthetic fixture
+secrets only for redaction tests. Runtime logs may contain project names and,
+when explicitly enabled, full local paths.
 
 ## Plugin-v2 direction
 
@@ -199,6 +247,8 @@ Defaults are privacy-first:
 - `ORCHESTRATOR_OBSERVABILITY_CAPTURE_TEXT` is disabled by default.
 - Full prompt/tool output/assistant message is not included by default.
 - When capture is enabled, values matching key/secret/token-like patterns are redacted before storage.
+- `cwd` and `transcript_path` are redacted in raw observability events by default.
+- `ORCHESTRATOR_OBSERVABILITY_INCLUDE_PATHS=1` preserves raw paths for local debugging only.
 - Analyzer reports redact full `codex_home` and `cwd` paths by default while preserving project-name aggregation.
 - Use `--include-paths` only for local-only debugging when full path metadata is needed.
 

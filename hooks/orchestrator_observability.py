@@ -18,6 +18,12 @@ _CAPTURE_TEXT = os.environ.get("ORCHESTRATOR_OBSERVABILITY_CAPTURE_TEXT", "0").s
     "yes",
     "on",
 }
+_INCLUDE_PATHS = os.environ.get("ORCHESTRATOR_OBSERVABILITY_INCLUDE_PATHS", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 _SECRET_KEY = r"(?:api[-_]?(?:key|token)|token|secret|password|bearer)"
 _REDACTION_PATTERNS = [
@@ -119,6 +125,25 @@ def _detect_session_id(transcript_path: str | None) -> Optional[str]:
     return None
 
 
+def _path_leaf(value: str) -> str:
+    normalized = value.strip().rstrip("\\/")
+    if not normalized:
+        return ""
+    return re.split(r"[\\/]+", normalized)[-1]
+
+
+def _redacted_path_label(value: str | None, kind: str) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if _INCLUDE_PATHS:
+        return value
+    if kind == "transcript":
+        session_id = _detect_session_id(value)
+        return f"session:{session_id}" if session_id else "[redacted]"
+    leaf = _path_leaf(value)
+    return f"project:{leaf}" if leaf else "[redacted]"
+
+
 def _resolve_codex_home(payload: Dict[str, Any]) -> Path:
     transcript_path = payload.get("transcript_path")
     if isinstance(transcript_path, str) and transcript_path.strip():
@@ -152,8 +177,8 @@ def _build_event(payload: Dict[str, Any], event_name: str, status: str, reason: 
         "source": "codex-orchestrator-kit",
         "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "session_id": _detect_session_id(payload.get("transcript_path")) if isinstance(payload.get("transcript_path"), str) else None,
-        "transcript_path": payload.get("transcript_path") if isinstance(payload.get("transcript_path"), str) else None,
-        "cwd": payload.get("cwd") if isinstance(payload.get("cwd"), str) else None,
+        "transcript_path": _redacted_path_label(payload.get("transcript_path"), "transcript"),
+        "cwd": _redacted_path_label(payload.get("cwd"), "cwd"),
         "hook": payload.get("hook") or "orchestrator",
         "script": payload.get("script") or __name__,
         "reason": reason[:400],

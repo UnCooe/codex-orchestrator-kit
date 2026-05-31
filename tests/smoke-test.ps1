@@ -70,7 +70,35 @@ Copy-Item -Path $fixtureBefore -Destination $origHookPath -Force
 
 $env:CODEX_HOME = $CodexHome
 $env:AGENTS_HOME = $AgentsHome
-& (Join-Path $root 'install.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome | Out-Null
+
+$defaultDryCodexHome = Join-Path $env:TEMP ('codex-orchestrator-kit-default-dry-codex-' + [Guid]::NewGuid().ToString('N'))
+$defaultDryAgentsHome = Join-Path $env:TEMP ('codex-orchestrator-kit-default-dry-agents-' + [Guid]::NewGuid().ToString('N'))
+& (Join-Path $root 'install.ps1') -CodexHome $defaultDryCodexHome -AgentsHome $defaultDryAgentsHome | Out-Null
+if ((Test-Path $defaultDryCodexHome) -or (Test-Path $defaultDryAgentsHome)) {
+    throw 'Default install without -Apply created target directories.'
+}
+
+$applyWithoutModesFailed = $false
+try {
+    & (Join-Path $root 'install.ps1') -CodexHome $defaultDryCodexHome -AgentsHome $defaultDryAgentsHome -Apply | Out-Null
+} catch {
+    $applyWithoutModesFailed = $true
+}
+if (-not $applyWithoutModesFailed) {
+    throw 'Apply mode without explicit HookMode/SkillsMode should fail.'
+}
+
+$applyDryRunFailed = $false
+try {
+    & (Join-Path $root 'install.ps1') -CodexHome $defaultDryCodexHome -AgentsHome $defaultDryAgentsHome -Apply -DryRun -HookMode auto -SkillsMode auto | Out-Null
+} catch {
+    $applyDryRunFailed = $_.Exception.Message -like '*Use either -Apply or -DryRun*'
+}
+if (-not $applyDryRunFailed) {
+    throw 'Install should reject using -Apply and -DryRun together.'
+}
+
+& (Join-Path $root 'install.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome -Apply -HookMode auto -SkillsMode auto | Out-Null
 
 $installedHookPath = Join-Path $CodexHome 'hooks.json'
 $installedText = Get-Content -Raw $installedHookPath
@@ -118,7 +146,7 @@ $overrideAgentsHome = Join-Path $env:TEMP ('codex-orchestrator-kit-python-overri
 $oldPythonOverride = $env:CODEX_ORCHESTRATOR_PYTHON
 try {
     $env:CODEX_ORCHESTRATOR_PYTHON = 'C:\Program Files\Python\python.exe'
-    & (Join-Path $root 'install.ps1') -CodexHome $overrideCodexHome -AgentsHome $overrideAgentsHome | Out-Null
+    & (Join-Path $root 'install.ps1') -CodexHome $overrideCodexHome -AgentsHome $overrideAgentsHome -Apply -HookMode auto -SkillsMode auto | Out-Null
     $overrideHooks = Get-Content -Raw (Join-Path $overrideCodexHome 'hooks.json') | ConvertFrom-Json
     $overrideCommand = $overrideHooks.hooks.UserPromptSubmit[0].hooks[0].command
     if (-not $overrideCommand.StartsWith('"C:\Program Files\Python\python.exe" ')) {
@@ -132,7 +160,7 @@ try {
     }
 }
 
-& (Join-Path $root 'install.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome | Out-Null
+& (Join-Path $root 'install.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome -Apply -HookMode auto -SkillsMode auto | Out-Null
 $installedText = Get-Content -Raw $installedHookPath
 if ([regex]::Matches($installedText, 'orchestrator_user_prompt\.py').Count -ne 1) {
     throw 'Install is not idempotent: duplicate orchestrator_user_prompt.py hook entry found.'
@@ -371,8 +399,8 @@ $preNoCaptureEvent = Read-JsonlLast -Path $eventLog.FullName
 if ($preNoCaptureEvent.event -ne 'orchestrator_observability') {
     throw 'Observability event for pre_tool_use was not written.'
 }
-if ($preNoCaptureEvent.transcript_path -ne $transcriptForObservability) {
-    throw 'Observability event did not preserve transcript_path metadata.'
+if ($preNoCaptureEvent.transcript_path -eq $transcriptForObservability -or $preNoCaptureEvent.transcript_path -notmatch '^session:') {
+    throw 'Observability event should redact transcript_path metadata by default.'
 }
 if ($preNoCaptureEvent.PSObject.Properties.Name -contains 'captured_text') {
     if ($preNoCaptureEvent.captured_text) {
@@ -406,6 +434,7 @@ if ($postNonShellEvent.event_name -ne 'post_tool_use' -or $postNonShellEvent.nor
     throw 'PostToolUse non-shell event missing normalized tool-surface metadata.'
 }
 
+# Synthetic fixture secret used only to verify redaction behavior.
 $env:ORCHESTRATOR_OBSERVABILITY_CAPTURE_TEXT = '1'
 $fakeSecret = 'sk-' + '1234567890abcdefghijklmnopqrstuvwxyz'
 $preCapture = Invoke-PythonHook -Script $preTool -InputJson (@{

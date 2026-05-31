@@ -3,3 +3,8 @@ __pycache__/
 *.bak.*
 .DS_Store
 Thumbs.db
+.env
+.env.*
+.codex/sessions/
+.codex/orchestrator-observability/
+.codex/reviewer-packs/

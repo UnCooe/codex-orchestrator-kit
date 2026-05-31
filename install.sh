@@ -4,10 +4,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CODEX_TARGET="${CODEX_HOME:-}"
 AGENTS_TARGET="${AGENTS_HOME:-}"
-DRY_RUN=0
+DRY_RUN=1
 HOOK_MODE="auto"
 SKILLS_MODE="auto"
 AGENTS_TARGET_EXPLICIT=0
+HOOK_MODE_EXPLICIT=0
+SKILLS_MODE_EXPLICIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -24,17 +26,23 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       shift
       ;;
+    --apply)
+      DRY_RUN=0
+      shift
+      ;;
     --hook-mode)
       HOOK_MODE="$2"
+      HOOK_MODE_EXPLICIT=1
       shift 2
       ;;
     --skills-mode)
       SKILLS_MODE="$2"
+      SKILLS_MODE_EXPLICIT=1
       shift 2
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: install.sh [--codex-home PATH] [--agents-home PATH] [--dry-run] [--hook-mode auto|hooks_json|config_toml] [--skills-mode auto|agents|codex]" >&2
+      echo "Usage: install.sh [--codex-home PATH] [--agents-home PATH] [--dry-run|--apply] [--hook-mode auto|hooks_json|config_toml] [--skills-mode auto|agents|codex]" >&2
       exit 2
       ;;
   esac
@@ -72,6 +80,17 @@ case "$SKILLS_MODE" in
     exit 2
     ;;
 esac
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  if [[ "$HOOK_MODE_EXPLICIT" != "1" ]]; then
+    echo "Apply mode requires an explicit --hook-mode value: hooks_json, config_toml, or auto" >&2
+    exit 2
+  fi
+  if [[ "$SKILLS_MODE_EXPLICIT" != "1" ]]; then
+    echo "Apply mode requires an explicit --skills-mode value: agents, codex, or auto" >&2
+    exit 2
+  fi
+fi
 
 if [[ -n "${CODEX_ORCHESTRATOR_PYTHON:-${CODX_ORCHESTRATOR_PYTHON:-}}" ]]; then
   PYTHON_CMD="${CODEX_ORCHESTRATOR_PYTHON:-${CODX_ORCHESTRATOR_PYTHON:-}}"
@@ -161,6 +180,22 @@ else
   SKILLS_TARGET_ROOT="$AGENTS_TARGET"
 fi
 
+echo "mode: $([[ "$DRY_RUN" == "1" ]] && printf 'dry-run' || printf 'apply')"
+echo "input: source=$SCRIPT_DIR, codex_home=$CODEX_TARGET, agents_home=$AGENTS_TARGET, hook_mode=$RESOLVED_HOOK_MODE, skills_mode=$RESOLVED_SKILLS_MODE"
+echo "install plan:"
+for plan_entry in \
+  "$SCRIPT_DIR/skills/orchestrator -> $SKILLS_TARGET_ROOT/skills/orchestrator" \
+  "$SCRIPT_DIR/skills/orchestrator-observability -> $SKILLS_TARGET_ROOT/skills/orchestrator-observability" \
+  "$SCRIPT_DIR/hooks -> $CODEX_TARGET/hooks" \
+  "$SCRIPT_DIR/agents -> $CODEX_TARGET/agents"; do
+  echo "  files: $plan_entry"
+done
+if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
+  echo "  hooks: $CODEX_TARGET/hooks.json ($([[ -f "$CODEX_TARGET/hooks.json" ]] && printf 'backup then merge' || printf 'create'))"
+else
+  echo "  hooks: $CODEX_TARGET/config.toml ($([[ -f "$CODEX_TARGET/config.toml" ]] && printf 'backup then merge managed block' || printf 'create managed block'))"
+fi
+
 if [[ "$DRY_RUN" != "1" ]]; then
   mkdir -p "$CODEX_TARGET" "$CODEX_TARGET/hooks" "$CODEX_TARGET/agents" "$SKILLS_TARGET_ROOT/skills"
 fi
@@ -190,9 +225,12 @@ copy_sources() {
     fi
     mkdir -p "$(dirname "$dst")"
     if [[ -f "$dst" ]]; then
-      cp "$dst" "${dst}.bak.$(backup_suffix)"
+      local backup="${dst}.bak.$(backup_suffix)"
+      cp "$dst" "$backup"
+      echo "backed up -> $backup"
     fi
     cp "$file" "$dst"
+    echo "installed: $dst"
   done < <(find "$src_dir" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0)
 }
 
@@ -477,14 +515,20 @@ fi
 
 if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
   if [[ "$DRY_RUN" != "1" && -f "$CODEX_TARGET/hooks.json" ]]; then
-    cp "$CODEX_TARGET/hooks.json" "$CODEX_TARGET/hooks.json.bak.$(backup_suffix)"
+    hook_backup="$CODEX_TARGET/hooks.json.bak.$(backup_suffix)"
+    cp "$CODEX_TARGET/hooks.json" "$hook_backup"
+    echo "backed up -> $hook_backup"
   fi
   merge_hooks_json >/dev/null
+  [[ "$DRY_RUN" == "1" ]] || echo "installed: $CODEX_TARGET/hooks.json"
 else
   if [[ "$DRY_RUN" != "1" && -f "$CODEX_TARGET/config.toml" ]]; then
-    cp "$CODEX_TARGET/config.toml" "$CODEX_TARGET/config.toml.bak.$(backup_suffix)"
+    config_backup="$CODEX_TARGET/config.toml.bak.$(backup_suffix)"
+    cp "$CODEX_TARGET/config.toml" "$config_backup"
+    echo "backed up -> $config_backup"
   fi
   merge_config_toml_hooks >/dev/null
+  [[ "$DRY_RUN" == "1" ]] || echo "installed: $CODEX_TARGET/config.toml"
 fi
 
 echo "done"

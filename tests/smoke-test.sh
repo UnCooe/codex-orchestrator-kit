@@ -20,7 +20,19 @@ else
 fi
 PYTHON_REAL=$(command -v "$PYTHON_BIN")
 
-"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" >/dev/null
+DEFAULT_DRY_CODEX="$TMP_ROOT/default-dry-codex"
+DEFAULT_DRY_AGENTS="$TMP_ROOT/default-dry-agents"
+"$ROOT/install.sh" --codex-home "$DEFAULT_DRY_CODEX" --agents-home "$DEFAULT_DRY_AGENTS" >/dev/null
+if [[ -e "$DEFAULT_DRY_CODEX" || -e "$DEFAULT_DRY_AGENTS" ]]; then
+  echo "Default install without --apply created target directories" >&2
+  exit 1
+fi
+if "$ROOT/install.sh" --codex-home "$DEFAULT_DRY_CODEX" --agents-home "$DEFAULT_DRY_AGENTS" --apply >/dev/null 2>&1; then
+  echo "Apply mode without explicit modes should fail" >&2
+  exit 1
+fi
+
+"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" --apply --hook-mode auto --skills-mode auto >/dev/null
 
 test -f "$AGENTS_HOME/skills/orchestrator/SKILL.md"
 test -f "$AGENTS_HOME/skills/orchestrator-observability/SKILL.md"
@@ -39,7 +51,7 @@ approval_policy = 'never'
 [features]
 codex_hooks = true
 EOF
-"$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex >/dev/null
+"$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex --apply >/dev/null
 test -f "$CONFIG_CODEX/skills/orchestrator/SKILL.md"
 test -f "$CONFIG_CODEX/skills/orchestrator-observability/SKILL.md"
 test -f "$CONFIG_CODEX/hooks/orchestrator_user_prompt.py"
@@ -54,7 +66,7 @@ for required in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
     if required not in hooks:
         raise SystemExit(f"config.toml mode missing hook: {required}")
 PY
-"$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex >/dev/null
+"$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex --apply >/dev/null
 "$PYTHON_BIN" - "$CONFIG_CODEX/config.toml" <<'PY'
 import pathlib
 import tomllib
@@ -95,7 +107,7 @@ timeout = 10
 [tui.model_availability_nux]
 "gpt-5.5" = 1
 EOF
-"$ROOT/install.sh" --codex-home "$EXISTING_HOOKS_CODEX" --hook-mode config_toml --skills-mode codex >/dev/null
+"$ROOT/install.sh" --codex-home "$EXISTING_HOOKS_CODEX" --hook-mode config_toml --skills-mode codex --apply >/dev/null
 "$PYTHON_BIN" - "$EXISTING_HOOKS_CODEX/config.toml" <<'PY'
 import pathlib
 import tomllib
@@ -177,7 +189,7 @@ grep -q 'pre-existing-user-prompt.py' "$CODEX_HOME/hooks.json"
 grep -q 'pre-existing-pre-tool.py' "$CODEX_HOME/hooks.json"
 grep -q 'orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json"
 
-"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" >/dev/null
+"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" --apply --hook-mode auto --skills-mode auto >/dev/null
 COUNT=$(grep -o 'orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json" | wc -l | tr -d ' ')
 if [[ "$COUNT" != "1" ]]; then
   echo "Install is not idempotent: orchestrator_user_prompt.py appears $COUNT times" >&2
@@ -303,7 +315,7 @@ EOF
 chmod +x "$SPACE_PY"
 OVERRIDE_CODEX="$TMP_ROOT/override-codex"
 OVERRIDE_AGENTS="$TMP_ROOT/override-agents"
-CODEX_ORCHESTRATOR_PYTHON="$SPACE_PY" "$ROOT/install.sh" --codex-home "$OVERRIDE_CODEX" --agents-home "$OVERRIDE_AGENTS" >/dev/null
+CODEX_ORCHESTRATOR_PYTHON="$SPACE_PY" "$ROOT/install.sh" --codex-home "$OVERRIDE_CODEX" --agents-home "$OVERRIDE_AGENTS" --apply --hook-mode auto --skills-mode auto >/dev/null
 "$PYTHON_BIN" - "$OVERRIDE_CODEX/hooks.json" "$SPACE_PY" <<'PY'
 import json
 import sys
@@ -326,6 +338,7 @@ JSONL
 PROJECT_CONTEXT_DIR="$TMP_ROOT/project-context-smoke"
 PROJECT_CONTEXT_NAME=$(basename "$PROJECT_CONTEXT_DIR")
 mkdir -p "$PROJECT_CONTEXT_DIR/.codex"
+# The following project context contains synthetic fixture secrets for redaction tests only.
 cat > "$PROJECT_CONTEXT_DIR/.codex/project-context.md" <<'EOF'
 项目目标: Smoke validation project
 当前阶段: test fixture
@@ -740,5 +753,25 @@ obj = json.loads(sys.argv[1])
 if obj["severity"] != "none":
     raise SystemExit(f"Live config patch should not be low risk: {obj}")
 PY
+
+UNINSTALL_CODEX="$TMP_ROOT/uninstall-codex"
+UNINSTALL_AGENTS="$TMP_ROOT/uninstall-agents"
+mkdir -p "$UNINSTALL_CODEX" "$UNINSTALL_AGENTS"
+cp "$ROOT/tests/fixtures/hooks.before.json" "$UNINSTALL_CODEX/hooks.json"
+"$ROOT/install.sh" --codex-home "$UNINSTALL_CODEX" --agents-home "$UNINSTALL_AGENTS" --apply --hook-mode auto --skills-mode auto >/dev/null
+"$ROOT/uninstall.sh" --codex-home "$UNINSTALL_CODEX" --agents-home "$UNINSTALL_AGENTS" --hook-mode auto --skills-mode auto >/dev/null
+if [[ -e "$UNINSTALL_AGENTS/skills/orchestrator/SKILL.md" ]]; then
+  echo "uninstall.sh left orchestrator skill installed" >&2
+  exit 1
+fi
+if [[ -e "$UNINSTALL_CODEX/hooks/orchestrator_user_prompt.py" ]]; then
+  echo "uninstall.sh left orchestrator hook installed" >&2
+  exit 1
+fi
+grep -q 'pre-existing-user-prompt.py' "$UNINSTALL_CODEX/hooks.json"
+if grep -q 'orchestrator_user_prompt.py' "$UNINSTALL_CODEX/hooks.json"; then
+  echo "uninstall.sh left managed hook entries in hooks.json" >&2
+  exit 1
+fi
 
 echo "smoke-test.sh passed"

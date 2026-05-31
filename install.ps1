@@ -3,6 +3,7 @@ param(
     [string]$AgentsHome = $env:AGENTS_HOME,
     [ValidateSet('auto', 'hooks_json', 'config_toml')] [string]$HookMode = 'auto',
     [ValidateSet('auto', 'agents', 'codex')] [string]$SkillsMode = 'auto',
+    [switch]$Apply,
     [switch]$DryRun
 )
 
@@ -11,6 +12,13 @@ $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+$InstallDryRun = -not $Apply.IsPresent
+if ($DryRun.IsPresent) {
+    if ($Apply.IsPresent) {
+        throw 'Use either -Apply or -DryRun, not both.'
+    }
+    $InstallDryRun = $true
+}
 
 function Get-CodexHome {
     param([string]$Value)
@@ -152,8 +160,8 @@ function Stage-Files {
 
     if (-not $Recurse) {
         $destDir = Split-Path $Destination -Parent
-        if ((-not $DryRun) -and (Test-Path $Destination)) { Backup-Path -Path $Destination }
-        if ($DryRun) {
+        if ((-not $InstallDryRun) -and (Test-Path $Destination)) { Backup-Path -Path $Destination }
+        if ($InstallDryRun) {
             Write-Host "[DRY-RUN] $Source -> $Destination"
             return
         }
@@ -171,9 +179,9 @@ function Stage-Files {
         $relative = $item.FullName.Substring($Source.Length).TrimStart('\\')
         $destinationFile = Join-Path $Destination $relative
         $parent = Split-Path $destinationFile -Parent
-        if ((-not $DryRun) -and (Test-Path $destinationFile)) { Backup-Path -Path $destinationFile }
+        if ((-not $InstallDryRun) -and (Test-Path $destinationFile)) { Backup-Path -Path $destinationFile }
 
-        if ($DryRun) {
+        if ($InstallDryRun) {
             Write-Host "[DRY-RUN] $($item.FullName) -> $destinationFile"
             continue
         }
@@ -280,7 +288,7 @@ function Merge-Hooks {
         $outputObj.hooks[$key] = $mergedObj[$key]
     }
 
-    if ($DryRun) {
+    if ($InstallDryRun) {
         Write-Host '[DRY-RUN] merged hooks.json:'
         Write-Output (ConvertTo-Json $outputObj -Depth 20)
         return
@@ -549,7 +557,7 @@ function Merge-ConfigTomlHooks {
     if ($regions.Suffix) { $sections.Add($regions.Suffix.TrimEnd()) }
     $newText = ($sections -join ([Environment]::NewLine + [Environment]::NewLine)).TrimEnd() + [Environment]::NewLine
 
-    if ($DryRun) {
+    if ($InstallDryRun) {
         Write-Host '[DRY-RUN] merged config.toml hooks block:'
         Write-Output $newText
         return
@@ -562,6 +570,14 @@ function Merge-ConfigTomlHooks {
 
 $CodexHome = Get-CodexHome $CodexHome
 $AgentsHome = Get-AgentsHome $AgentsHome
+if (-not $InstallDryRun) {
+    if (-not $PSBoundParameters.ContainsKey('HookMode')) {
+        throw 'Apply mode requires an explicit -HookMode value. Use -HookMode hooks_json, -HookMode config_toml, or -HookMode auto.'
+    }
+    if (-not $PSBoundParameters.ContainsKey('SkillsMode')) {
+        throw 'Apply mode requires an explicit -SkillsMode value. Use -SkillsMode agents, -SkillsMode codex, or -SkillsMode auto.'
+    }
+}
 $PythonCommand = Resolve-PythonCommand
 $HookPythonCommand = ConvertTo-HookPythonCommand $PythonCommand
 $CodexHomeNormalized = ($CodexHome -replace '\\', '/')
@@ -569,6 +585,7 @@ $ResolvedHookMode = Resolve-HookMode -Mode $HookMode -CodexHomePath $CodexHome
 $ResolvedSkillsMode = Resolve-SkillsMode -Mode $SkillsMode -ResolvedHookMode $ResolvedHookMode -CodexHomePath $CodexHome -AgentsHomePath $AgentsHome
 $SkillsRoot = if ($ResolvedSkillsMode -eq 'codex') { $CodexHome } else { $AgentsHome }
 
+Write-Host "mode: $(if ($InstallDryRun) { 'dry-run' } else { 'apply' })"
 Write-Host "input: source=$scriptRoot, codex_home=$CodexHome, agents_home=$AgentsHome, hook_mode=$ResolvedHookMode, skills_mode=$ResolvedSkillsMode"
 
 $targets = @(
@@ -577,6 +594,20 @@ $targets = @(
     @{ Source = Join-Path $scriptRoot 'hooks'; Destination = Join-Path $CodexHome 'hooks' },
     @{ Source = Join-Path $scriptRoot 'agents'; Destination = Join-Path $CodexHome 'agents' }
 )
+
+Write-Host 'install plan:'
+foreach ($target in $targets) {
+    $existing = if (Test-Path $target.Destination) { 'backup existing files before overwrite' } else { 'create/copy files' }
+    Write-Host "  files: $($target.Source) -> $($target.Destination) ($existing)"
+}
+if ($ResolvedHookMode -eq 'hooks_json') {
+    $plannedHookSurface = Join-Path $CodexHome 'hooks.json'
+    $plannedHookAction = if (Test-Path $plannedHookSurface) { 'backup then merge' } else { 'create' }
+} else {
+    $plannedHookSurface = Join-Path $CodexHome 'config.toml'
+    $plannedHookAction = if (Test-Path $plannedHookSurface) { 'backup then merge managed block' } else { 'create managed block' }
+}
+Write-Host "  hooks: $plannedHookSurface ($plannedHookAction)"
 
 foreach ($target in $targets) {
     Stage-Files -Source $target.Source -Destination $target.Destination -Recurse
@@ -587,7 +618,7 @@ if ($ResolvedHookMode -eq 'hooks_json') {
     $hooksTemplate = $hooksTemplate.Replace('{{CODEX_HOME}}', (ConvertTo-JsonStringContent $CodexHomeNormalized))
     $hooksTemplate = $hooksTemplate.Replace('{{PYTHON_EXE}}', (ConvertTo-JsonStringContent $HookPythonCommand))
     $hooksPath = Join-Path $CodexHome 'hooks.json'
-    if ((-not $DryRun) -and (Test-Path $hooksPath)) {
+    if ((-not $InstallDryRun) -and (Test-Path $hooksPath)) {
         Backup-Path -Path $hooksPath
     }
 
@@ -597,7 +628,7 @@ if ($ResolvedHookMode -eq 'hooks_json') {
     $configTemplate = $configTemplate.Replace('{{CODEX_HOME}}', (ConvertTo-JsonStringContent $CodexHomeNormalized))
     $configTemplate = $configTemplate.Replace('{{PYTHON_EXE}}', (ConvertTo-JsonStringContent $HookPythonCommand))
     $configPath = Join-Path $CodexHome 'config.toml'
-    if ((-not $DryRun) -and (Test-Path $configPath)) {
+    if ((-not $InstallDryRun) -and (Test-Path $configPath)) {
         Backup-Path -Path $configPath
     }
     Merge-ConfigTomlHooks -TemplateContent $configTemplate -OutputPath $configPath -BeginMarker '# BEGIN codex-orchestrator-kit managed hooks' -EndMarker '# END codex-orchestrator-kit managed hooks'
