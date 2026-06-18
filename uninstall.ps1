@@ -116,6 +116,10 @@ $SkillsHome = if ($ResolvedSkillsMode -eq 'codex') { $CodexHome } else { $Agents
 $removeTargets = @(
     (Join-Path $SkillsHome 'skills\orchestrator')
     (Join-Path $SkillsHome 'skills\orchestrator-observability')
+    (Join-Path $SkillsHome 'skills\feature-workflow')
+    (Join-Path $SkillsHome 'skills\merge-workflow')
+    (Join-Path $SkillsHome 'skills\review-workflow')
+    (Join-Path $SkillsHome 'skills\predeploy-workflow')
     (Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_post_tool_use.py')
     (Join-Path $CodexHome 'hooks\orchestrator_stop.py')
@@ -126,6 +130,12 @@ $removeTargets = @(
     (Join-Path $CodexHome 'agents\researcher.toml')
     (Join-Path $CodexHome 'agents\reviewer.toml')
     (Join-Path $CodexHome 'agents\test-designer.toml')
+    (Join-Path $CodexHome 'agents\requirements-interpreter.toml')
+    (Join-Path $CodexHome 'agents\test-writer.toml')
+    (Join-Path $CodexHome 'agents\test-runner.toml')
+    (Join-Path $CodexHome 'agents\conflict-resolver.toml')
+    (Join-Path $CodexHome 'agents\deployer.toml')
+    (Join-Path $CodexHome 'agents\codebase-research-explorer.toml')
 )
 
 if ($ResolvedHookMode -eq 'hooks_json') {

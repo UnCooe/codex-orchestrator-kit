@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "orchestrator-observability" / "scripts"
 HOOKS = ROOT / "hooks"
+FIXTURE_SINCE_DAYS = 3650
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(HOOKS))
 
@@ -332,7 +333,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_report(codex_home, since_days=30, report_id="current", max_samples=5, reports_dir=str(reports_root))
+            output = build_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="current", max_samples=5, reports_dir=str(reports_root))
 
             self.assertEqual(output["trend"]["overall"], "worsening")
             footer_signal = next(
@@ -414,7 +415,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
             output = build_subagent_workflow_report(
                 codex_home,
-                since_days=30,
+                since_days=FIXTURE_SINCE_DAYS,
                 report_id="workflow",
                 reports_dir=str(reports_root),
                 max_samples=5,
@@ -468,7 +469,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
             output = build_subagent_workflow_report(
                 codex_home,
-                since_days=30,
+                since_days=FIXTURE_SINCE_DAYS,
                 report_id="workflow-heavy",
                 reports_dir=str(reports_root),
                 max_samples=5,
@@ -510,7 +511,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
             output = build_subagent_workflow_report(
                 codex_home,
-                since_days=30,
+                since_days=FIXTURE_SINCE_DAYS,
                 report_id="workflow-insufficient",
                 reports_dir=str(reports_root),
                 max_samples=5,
@@ -553,7 +554,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
             output = build_subagent_workflow_report(
                 codex_home,
-                since_days=30,
+                since_days=FIXTURE_SINCE_DAYS,
                 report_id="workflow-baseline",
                 reports_dir=str(reports_root),
                 max_samples=5,
@@ -594,7 +595,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
             output = build_subagent_workflow_report(
                 codex_home,
-                since_days=30,
+                since_days=FIXTURE_SINCE_DAYS,
                 report_id="workflow-broad-scan",
                 reports_dir=str(reports_root),
                 max_samples=5,
@@ -654,7 +655,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
 
             output = build_subagent_workflow_report(
                 codex_home,
-                since_days=30,
+                since_days=FIXTURE_SINCE_DAYS,
                 report_id="workflow-soft-acceptance",
                 reports_dir=str(reports_root),
                 max_samples=5,
@@ -685,7 +686,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_report(codex_home, since_days=30, report_id="analyze-subagent", max_samples=5, reports_dir=str(reports_root))
+            output = build_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="analyze-subagent", max_samples=5, reports_dir=str(reports_root))
 
             self.assertEqual(output["acceptance"].get("work_done_missing_subagent_status", 0), 0)
 
@@ -1034,7 +1035,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_report(codex_home, since_days=30, report_id="context", max_samples=5, reports_dir=str(reports_root))
+            output = build_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="context", max_samples=5, reports_dir=str(reports_root))
 
             context = output["project_context"]["project:repo"]
             self.assertTrue(context["available"])
@@ -1057,7 +1058,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_report(codex_home, since_days=30, report_id="context-paths", max_samples=5, reports_dir=str(reports_root), include_paths=True)
+            output = build_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="context-paths", max_samples=5, reports_dir=str(reports_root), include_paths=True)
 
             report = json.loads(Path(output["json_report"]).read_text(encoding="utf-8"))
             self.assertTrue(report["paths_included"])
@@ -1082,7 +1083,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="workflow-paths", max_samples=5, reports_dir=str(reports_root), include_paths=True)
+            output = build_subagent_workflow_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="workflow-paths", max_samples=5, reports_dir=str(reports_root), include_paths=True)
 
             report = json.loads(Path(output["json_report"]).read_text(encoding="utf-8"))
             self.assertTrue(report["paths_included"])
@@ -1105,7 +1106,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                     {"payload": {"type": "message", "role": "assistant", "content": "Nothing to change here."}, "timestamp": "2026-05-02T00:01:00Z"},
                 ],
             )
-            output = build_report(codex_home, since_days=30, report_id="context-triage", max_samples=5, reports_dir=str(reports_root))
+            output = build_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="context-triage", max_samples=5, reports_dir=str(reports_root))
             report = json.loads(Path(output["json_report"]).read_text(encoding="utf-8"))
 
             severity, reasons, flags = classify(report)
@@ -1133,7 +1134,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_report(codex_home, since_days=30, report_id="signal", max_samples=5, reports_dir=str(reports_root))
+            output = build_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="signal", max_samples=5, reports_dir=str(reports_root))
 
             self.assertEqual(output["acceptance"]["work_done_missing_acceptance_footer"], 1)
             self.assertEqual(output["acceptance"]["work_done_acceptance_signal_complete"], 1)
@@ -1158,7 +1159,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="broad", max_samples=5, reports_dir=str(reports_root))
+            output = build_subagent_workflow_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="broad", max_samples=5, reports_dir=str(reports_root))
 
             self.assertEqual(output["workflow_signals"]["broad_scan_bypasses_observed"], 1)
             self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 0)
@@ -1183,7 +1184,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="plain-workflow", max_samples=5, reports_dir=str(reports_root))
+            output = build_subagent_workflow_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="plain-workflow", max_samples=5, reports_dir=str(reports_root))
 
             self.assertEqual(output["workflow_signals"]["broad_scan_bypasses_observed"], 0)
             self.assertEqual(output["workflow_signals"]["broad_scan_bypasses"], 0)
@@ -1226,7 +1227,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_subagent_workflow_report(codex_home, since_days=30, report_id="retained", max_samples=5, reports_dir=str(reports_root))
+            output = build_subagent_workflow_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="retained", max_samples=5, reports_dir=str(reports_root))
 
             self.assertEqual(output["subagents"]["unresolved_lifecycle_delta"], 0)
             self.assertEqual(output["workflow_policy"], "observe")
@@ -1264,7 +1265,7 @@ class AcceptanceFooterAndTriageTests(unittest.TestCase):
                 ],
             )
 
-            output = build_report(codex_home, since_days=30, report_id="large", max_samples=5, reports_dir=str(reports_root))
+            output = build_report(codex_home, since_days=FIXTURE_SINCE_DAYS, report_id="large", max_samples=5, reports_dir=str(reports_root))
             report_text = (reports_root / "orchestrator-observability-large.json").read_text(encoding="utf-8")
 
             self.assertEqual(output["noise"]["large_tool_outputs"], 2)

@@ -5,7 +5,11 @@ import sys
 from pathlib import Path
 
 from orchestrator_observability import emit_observability_event
-from workflow_profile import current_turn_capabilities
+from workflow_profile import (
+    current_turn_capabilities,
+    current_turn_workflow_state,
+    workflow_state_status,
+)
 
 
 WORK_DONE = [
@@ -471,6 +475,24 @@ def current_turn_subagent_counts(transcript_path: str | None) -> tuple[int, int]
             close_count += 1
     return spawn_count, close_count
 
+
+def workflow_stop_public_reason(status: dict[str, object]) -> str:
+    errors = status.get("errors", [])
+    if not isinstance(errors, list):
+        return "Workflow state is incomplete."
+    if "missing_required_roles" in errors or "missing_required_role_alternative" in errors:
+        return "Split workflow is missing required role lifecycle evidence."
+    if "missing_verification_commands" in errors:
+        return "Split workflow is missing verification_commands in workflow_state."
+    if "missing_reviewer_result" in errors:
+        return "Split workflow is missing reviewer_result in workflow_state."
+    if "spawned_roles_not_closed" in errors:
+        return "Split workflow has spawned roles that were not closed or retained with a reason."
+    if "invalid_current_mode" in errors:
+        return "workflow_state.current_mode must be tiny_direct or split_workflow."
+    return "Workflow state is incomplete."
+
+
 def main() -> int:
     payload = json.load(sys.stdin)
     if payload.get("stop_hook_active"):
@@ -507,6 +529,8 @@ def main() -> int:
     used_subagents = transcript_has_subagent_signal(payload.get("transcript_path"))
     spawn_count, close_count = current_turn_subagent_counts(payload.get("transcript_path"))
     current_capabilities = current_turn_capabilities(payload)
+    workflow_state = current_turn_workflow_state(payload)
+    workflow_status = workflow_state_status(workflow_state, payload)
     acceptance_source, acceptance_fields = acceptance_source_and_fields(message)
     has_verification = matches_any(VERIFICATION, message_lower)
     did_work = matches_any(WORK_DONE, message)
@@ -544,8 +568,22 @@ def main() -> int:
         verification_contradiction=verification_contradiction,
         risk_contradiction=risk_contradiction,
     )
+    state["workflow_state"] = workflow_state
+    state["workflow_state_status"] = workflow_status
 
-    if used_subagents and spawn_count > close_count and "retained because" not in message_lower:
+    workflow_errors = workflow_status.get("errors", [])
+    if did_work and workflow_state.get("current_mode") and workflow_errors:
+        return stop_gate_result(
+            payload,
+            reason="workflow_state_incomplete",
+            public_reason=workflow_stop_public_reason(workflow_status),
+            acceptance_source=acceptance_source,
+            acceptance={**base_acceptance(acceptance_source), "completion_state": state},
+            extra={"workflow_state": workflow_state, "workflow_state_status": workflow_status, "completion_state": state},
+        )
+
+    retained_reason = str(workflow_state.get("retained_subagents_reason", "") or "").strip()
+    if used_subagents and spawn_count > close_count and "retained because" not in message_lower and not retained_reason:
         return stop_gate_result(
             payload,
             reason="subagent_lifecycle_incomplete",

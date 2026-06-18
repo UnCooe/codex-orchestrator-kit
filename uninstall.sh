@@ -198,6 +198,10 @@ fi
 remove_targets=(
   "$SKILLS_HOME/skills/orchestrator"
   "$SKILLS_HOME/skills/orchestrator-observability"
+  "$SKILLS_HOME/skills/feature-workflow"
+  "$SKILLS_HOME/skills/merge-workflow"
+  "$SKILLS_HOME/skills/review-workflow"
+  "$SKILLS_HOME/skills/predeploy-workflow"
   "$CODEX_TARGET/hooks/orchestrator_pre_tool_use.py"
   "$CODEX_TARGET/hooks/orchestrator_post_tool_use.py"
   "$CODEX_TARGET/hooks/orchestrator_stop.py"
@@ -208,6 +212,12 @@ remove_targets=(
   "$CODEX_TARGET/agents/researcher.toml"
   "$CODEX_TARGET/agents/reviewer.toml"
   "$CODEX_TARGET/agents/test-designer.toml"
+  "$CODEX_TARGET/agents/requirements-interpreter.toml"
+  "$CODEX_TARGET/agents/test-writer.toml"
+  "$CODEX_TARGET/agents/test-runner.toml"
+  "$CODEX_TARGET/agents/conflict-resolver.toml"
+  "$CODEX_TARGET/agents/deployer.toml"
+  "$CODEX_TARGET/agents/codebase-research-explorer.toml"
 )
 
 for target in "${remove_targets[@]}"; do

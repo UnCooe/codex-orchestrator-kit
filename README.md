@@ -92,6 +92,7 @@ This harness is successful when recurring review can explain whether the workflo
   - `scripts/triage.py`
   - `scripts/session_facts.py`
   - `scripts/subagent_workflow.py`
+  - `scripts/subagent_value_review.py`
   - `agents/openai.yaml`
 - `agents/` Toml role definitions copied from local config
   - `critic.toml`

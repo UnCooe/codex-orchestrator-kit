@@ -5,93 +5,102 @@ description: Default Codex orchestration workflow for complex tasks, code implem
 
 # Orchestrator
 
-Use this skill to keep the main Codex thread focused on decisions while delegating noisy work to subagents.
+Use this skill as the routing skeleton. Keep the main Codex thread responsible for mode selection, delegation, synthesis, and final acceptance; push scenario details into the selected workflow skill.
 
-## Decision Gate
+Current role contract: `subagent-role-v2.0`. Keep `workflow_state.state_version=1`.
 
-Before broad exploration, long command output, or file edits, decide whether the task is heavy.
+## Mode Gate
 
-Delegate by default for:
-- code implementation beyond a trivial single-file edit
-- repo-wide or cross-module reading
-- research, dependency/API verification, log analysis, or document scanning
-- test case design, regression analysis, PR review, risk review, or destructive critique
-- architecture, migration, refactor, or option comparison
+Choose one mode before broad reading, long output, or multi-file edits:
 
-Do not delegate when:
-- the task is a simple command or a tiny single-file change
-- the user explicitly asks the main agent to work directly
-- subagent startup cost is clearly higher than the task
-- the next critical-path step is blocked on information the main agent can obtain faster
+- `tiny_direct`: simple command, tiny localized read, or small direct edit where delegation cost is higher than value.
+- `split_workflow`: non-trivial implementation, tests, review, merge conflict, predeploy, broad research, or risky design/architecture work.
 
-When not delegating a non-trivial task, state the reason briefly.
+For heavy work, maintain this machine-readable ledger in the assistant transcript:
 
-## Delegation Patterns
+```text
+workflow_state.state_version=1
+workflow_state.task_id=<stable task id>
+workflow_state.turn_id=<turn/session id when available>
+workflow_state.created_at=<ISO-8601>
+workflow_state.updated_at=<ISO-8601>
+workflow_state.current_mode=split_workflow
+workflow_state.task_class=feature
+workflow_state.selected_skill=feature
+workflow_state.stage=planning
+workflow_state.required_roles=implementer,test_designer,test_runner,reviewer
+workflow_state.spawned_roles=
+workflow_state.waited_roles=
+workflow_state.closed_roles=
+workflow_state.role_assignments={}
+workflow_state.role_evidence={}
+workflow_state.verification_commands=
+workflow_state.reviewer_result=
+workflow_state.exception_reason=
+workflow_state.retained_subagents_reason=
+workflow_state.files_changed=
+workflow_state.final_status=
+```
 
-Use available built-in subagent types when the runtime exposes them and the current runtime permits spawning. If the runtime requires explicit user authorization for subagents and authorization is not present, state that exception briefly and keep the main thread on low-noise tool execution and acceptance.
-If custom agents are not loaded, use the closest built-in type and put the role contract directly in the prompt:
-- `researcher`: use `researcher`/`explorer` for read-only repo or documentation exploration.
-- `implementer`: use `implementer`/`worker` for targeted code changes with an explicit write scope.
-- `test_designer`: use `test_designer` for independent test cases, edge cases, and acceptance criteria.
-- `reviewer`: use `reviewer` for correctness, regression, security, and missing-test review.
-- `critic`: use `critic` for destructive review of assumptions, architecture, tradeoffs, and likely failure modes.
+For `tiny_direct` heavy exceptions, set `workflow_state.exception_reason=<why delegation is not useful>` and `workflow_state.mode_reason=<same short reason>` for older hooks.
 
-Always include the role contract in the subagent prompt. Do not rely on custom TOML being loaded by the runtime.
-When delegating, read `references/subagent-prompts.md` and adapt the shortest matching template instead of writing a fresh prompt from scratch.
+## Skill Routing
 
-For coding work, separate roles:
-1. Main agent confirms goal, boundaries, and acceptance criteria.
-2. `researcher` maps relevant code when the code path is unclear.
-3. `implementer` edits only the assigned files or module.
-4. `test_designer` defines tests without trusting the implementation.
-5. `reviewer` or `critic` challenges the result before final acceptance.
+Select the narrowest workflow skill:
 
-For write-heavy work, avoid parallel edits to the same files. If ownership cannot be cleanly split, use one implementer and keep other subagents read-only.
+- Feature or bugfix implementation: use `$feature-workflow`.
+- Merge, rebase, cherry-pick, branch sync, or conflict resolution: use `$merge-workflow` and any project merge-safety skill.
+- Review-only request: use `$review-workflow`.
+- Predeploy/deploy verification: use `$predeploy-workflow`; deployer requires current-turn authorization.
 
-## Subagent Lifecycle Gate
+Project-specific rules must come from project profiles or project skills. Do not create globally project-bound roles for a generic workflow.
 
-Treat subagent slots as scarce.
+## Role Defaults
 
-For every subagent:
-- record the agent id, role, and task purpose in the main thread
-- wait only when the result is needed for the next decision or final acceptance
-- close the subagent immediately after its result is collected, unless it is needed for the same continuous workflow
-- if retaining a subagent, state the reason, next task, and expected close point
+Required core roles for feature work:
 
-Before final response, close finished subagents. Only mention retained subagents if one is intentionally left open for the next turn.
+- `implementer`
+- `test_designer`
+- `test_runner`
+- `reviewer`
 
-## Main Thread Contract
+Optional roles:
 
-Keep subagent prompts self-contained and narrow. Tell each subagent:
-- the exact task and scope
-- whether it may edit files
-- which files or modules it owns, if editing
-- that other agents may also be working and it must not revert unrelated edits
-- the required concise return format
+- `requirements_interpreter`
+- `researcher`
+- `test_writer`
+- `critic` for high-risk architecture, migrations, broad refactors, deployment risk, or explicitly requested destructive critique
+- `deployer` for predeploy/deploy only after current-turn authorization
 
-Ask subagents to return only:
-- conclusion
-- evidence
-- risks
-- alternatives
-- recommended action
-- changed files, when they edited files
+Special role:
 
-Do not paste raw logs, full file dumps, or long reasoning into the main thread. Summarize and cite only the evidence needed for the decision.
-Internal workflow contracts are for hooks and observability, not for the user-visible reply.
-Do not paste `WORK_CONTRACT_BEGIN/END`, role-registration text, `ACCEPTANCE:` blocks, or similar control blocks into the visible response unless the user explicitly asks for workflow detail.
-If the user needs to understand the execution path, compress it into one short sentence such as:
-`执行模式：targeted_refactor；范围限于 hooks/tests；本轮未委托，因为当前运行时不适合默认委托。`
+- `conflict_resolver` resolves merge conflicts only and does not satisfy `implementer`.
 
-## Acceptance Gate
+When delegating, read `references/subagent-prompts.md` and adapt the shortest matching template. Always put the role contract in the prompt; do not assume custom TOML is loaded.
+
+## Ledger Discipline
+
+Update `workflow_state` as work progresses:
+
+- after spawn: append the role to `spawned_roles`
+- after wait/result consumption: append the role to `waited_roles`
+- after close: append the role to `closed_roles`
+- after validation: append concrete command objects or not-run blockers to `verification_commands`
+- after review: set `reviewer_result=pass|fail|needs_context:<short reason>`
+- after each role result: update `role_evidence.<role>` with concise result, status, and summary path if available
+- after file edits: update `files_changed`
+- before completion: set `stage=done` and `final_status=pass|fail|blocked|needs_context|not_run`
+- if retaining any subagent across turns: set `retained_subagents_reason=<why, next task, expected close point>`
+
+Hooks consume this ledger as evidence. Natural-language claims are not the primary completion boundary.
+
+## Output Contract
+
+Keep final replies user-facing. Do not expose internal role registration, long hook instructions, `WORK_CONTRACT` blocks, or `ACCEPTANCE:` blocks unless the user explicitly asks for workflow detail.
 
 Before final response:
-- verify the original request is satisfied
-- mention tests/checks run, or why they were not run
-- include review/critique outcome for heavy work, or why it was omitted
-- call out remaining assumptions, risks, or rollback notes
-- close unused subagents when the workflow is complete
-- keep the final reply user-facing; do not add machine-only acceptance or lifecycle fields by default
 
-Hooks infer lifecycle, verification, and risk from transcript events plus summary semantics. Assume `UserPromptSubmit` is silent by default and only emits a short high-risk reminder when the workflow is already in an alert state.
-If a stop hook blocks the turn, it is because the result looks internally inconsistent or unsafe, not because a footer is missing.
+- verify the user request is satisfied
+- report tests/checks run or why they were not run
+- include review outcome for heavy work
+- close finished subagents or explain a retained one in one short sentence

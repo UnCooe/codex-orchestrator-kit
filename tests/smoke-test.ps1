@@ -67,9 +67,12 @@ function Assert-JsonField {
 $origHookPath = Join-Path $CodexHome 'hooks.json'
 $fixtureBefore = Join-Path $root 'tests\fixtures\hooks.before.json'
 Copy-Item -Path $fixtureBefore -Destination $origHookPath -Force
+New-Item -ItemType Directory -Path (Join-Path $CodexHome 'agents') -Force | Out-Null
+'name = "codebase_research_explorer"' | Set-Content -Path (Join-Path $CodexHome 'agents\codebase-research-explorer.toml') -Encoding utf8
 
 $env:CODEX_HOME = $CodexHome
 $env:AGENTS_HOME = $AgentsHome
+$fixtureSinceDays = 3650
 
 $defaultDryCodexHome = Join-Path $env:TEMP ('codex-orchestrator-kit-default-dry-codex-' + [Guid]::NewGuid().ToString('N'))
 $defaultDryAgentsHome = Join-Path $env:TEMP ('codex-orchestrator-kit-default-dry-agents-' + [Guid]::NewGuid().ToString('N'))
@@ -120,6 +123,9 @@ if ($installedText -match 'legacy.*orchestrator_pre_tool_use\.py') {
 }
 if ($installedText -notmatch 'pre-existing-user-prompt\.py' -or $installedText -notmatch 'pre-existing-pre-tool\.py') {
     throw 'Install merge did not preserve pre-existing same-event hook entries.'
+}
+if (Test-Path (Join-Path $CodexHome 'agents\codebase-research-explorer.toml')) {
+    throw 'Deprecated codebase-research-explorer agent should be removed during install.'
 }
 
 $dryCodexHome = Join-Path $env:TEMP ('codex-orchestrator-kit-dry-codex-' + [Guid]::NewGuid().ToString('N'))
@@ -516,7 +522,7 @@ if ($python.Length -gt 1) {
 }
 & $python[0] @($unitArgs + (Join-Path $root 'tests\test_session_facts_since_days.py'))
 & $python[0] @($unitArgs + (Join-Path $root 'tests\test_acceptance_footer_and_triage.py'))
-$analyzerOutput = & $python[0] @($python[1..($python.Length - 1)] + $analyzer + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $reportId))
+$analyzerOutput = & $python[0] @($python[1..($python.Length - 1)] + $analyzer + @('--codex-home', $CodexHome, '--since-days', $fixtureSinceDays, '--report-id', $reportId))
 $analyzerOutputObj = $analyzerOutput | ConvertFrom-Json
 if ($analyzerOutputObj.totals.orchestrator_events -lt 3) {
     throw 'Analyzer did not classify fixture orchestrator events.'
@@ -637,7 +643,7 @@ if (-not $reportObj.trend -or -not $reportObj.trend.overall) {
 }
 
 $subagentWorkflowReportId = ('smoke-subagent-' + [Guid]::NewGuid().ToString('N'))
-$subagentWorkflowOutput = & $python[0] @($python[1..($python.Length - 1)] + $subagentWorkflow + @('--codex-home', $CodexHome, '--since-days', 30, '--report-id', $subagentWorkflowReportId))
+$subagentWorkflowOutput = & $python[0] @($python[1..($python.Length - 1)] + $subagentWorkflow + @('--codex-home', $CodexHome, '--since-days', $fixtureSinceDays, '--report-id', $subagentWorkflowReportId))
 $subagentWorkflowOutputObj = $subagentWorkflowOutput | ConvertFrom-Json
 if ($subagentWorkflowOutputObj.subagents.spawn -lt 1 -or $subagentWorkflowOutputObj.subagents.close -lt 1) {
     throw 'Subagent workflow report did not count spawn/close activity.'

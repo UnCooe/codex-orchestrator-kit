@@ -506,8 +506,28 @@ PY
 
 copy_sources "$SCRIPT_DIR/skills/orchestrator" "$SKILLS_TARGET_ROOT/skills/orchestrator"
 copy_sources "$SCRIPT_DIR/skills/orchestrator-observability" "$SKILLS_TARGET_ROOT/skills/orchestrator-observability"
+copy_sources "$SCRIPT_DIR/skills/feature-workflow" "$SKILLS_TARGET_ROOT/skills/feature-workflow"
+copy_sources "$SCRIPT_DIR/skills/merge-workflow" "$SKILLS_TARGET_ROOT/skills/merge-workflow"
+copy_sources "$SCRIPT_DIR/skills/review-workflow" "$SKILLS_TARGET_ROOT/skills/review-workflow"
+copy_sources "$SCRIPT_DIR/skills/predeploy-workflow" "$SKILLS_TARGET_ROOT/skills/predeploy-workflow"
 copy_sources "$SCRIPT_DIR/hooks" "$CODEX_TARGET/hooks"
 copy_sources "$SCRIPT_DIR/agents" "$CODEX_TARGET/agents"
+
+remove_deprecated_agent() {
+  local target="$CODEX_TARGET/agents/$1"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[DRY-RUN] remove deprecated agent if present: $target"
+    return
+  fi
+  if [[ -e "$target" ]]; then
+    local backup="${target}.bak.$(backup_suffix)"
+    cp "$target" "$backup"
+    rm -f "$target"
+    echo "removed deprecated agent: $target (backup: $backup)"
+  fi
+}
+
+remove_deprecated_agent "codebase-research-explorer.toml"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "[DRY-RUN] hook_mode=$RESOLVED_HOOK_MODE skills_mode=$RESOLVED_SKILLS_MODE skills_root=$SKILLS_TARGET_ROOT"

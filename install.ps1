@@ -192,6 +192,21 @@ function Stage-Files {
     }
 }
 
+function Remove-DeprecatedAgent {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $target = Join-Path (Join-Path $CodexHome 'agents') $Name
+    if ($InstallDryRun) {
+        Write-Host "[DRY-RUN] remove deprecated agent if present: $target"
+        return
+    }
+    if (Test-Path $target) {
+        Backup-Path -Path $target
+        Remove-Item -Path $target -Force
+        Write-Host "removed deprecated agent: $target"
+    }
+}
+
 function Merge-Hooks {
     param(
         [string]$TemplateContent,
@@ -591,6 +606,10 @@ Write-Host "input: source=$scriptRoot, codex_home=$CodexHome, agents_home=$Agent
 $targets = @(
     @{ Source = Join-Path $scriptRoot 'skills\orchestrator'; Destination = Join-Path $SkillsRoot 'skills\orchestrator' },
     @{ Source = Join-Path $scriptRoot 'skills\orchestrator-observability'; Destination = Join-Path $SkillsRoot 'skills\orchestrator-observability' },
+    @{ Source = Join-Path $scriptRoot 'skills\feature-workflow'; Destination = Join-Path $SkillsRoot 'skills\feature-workflow' },
+    @{ Source = Join-Path $scriptRoot 'skills\merge-workflow'; Destination = Join-Path $SkillsRoot 'skills\merge-workflow' },
+    @{ Source = Join-Path $scriptRoot 'skills\review-workflow'; Destination = Join-Path $SkillsRoot 'skills\review-workflow' },
+    @{ Source = Join-Path $scriptRoot 'skills\predeploy-workflow'; Destination = Join-Path $SkillsRoot 'skills\predeploy-workflow' },
     @{ Source = Join-Path $scriptRoot 'hooks'; Destination = Join-Path $CodexHome 'hooks' },
     @{ Source = Join-Path $scriptRoot 'agents'; Destination = Join-Path $CodexHome 'agents' }
 )
@@ -612,6 +631,8 @@ Write-Host "  hooks: $plannedHookSurface ($plannedHookAction)"
 foreach ($target in $targets) {
     Stage-Files -Source $target.Source -Destination $target.Destination -Recurse
 }
+
+Remove-DeprecatedAgent -Name 'codebase-research-explorer.toml'
 
 if ($ResolvedHookMode -eq 'hooks_json') {
     $hooksTemplate = Get-Content -Path (Join-Path $scriptRoot 'templates\hooks.json.tpl') -Raw

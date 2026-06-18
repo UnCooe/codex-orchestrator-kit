@@ -59,6 +59,7 @@ A reviewer is a focused review capability with a documented rubric.
 Default reviewer:
 
 - `subagent-workflow`: delegation quality, spawn/wait/close balance, unclosed agents, heavy-work delegation, and broad-scan behavior.
+- `subagent-value`: value-oriented delegation review, including handoff quality, result quality, main-agent consumption, context savings, duplication cost, missed-use candidates, and net utility.
 
 Optional external reviewer packs live outside the core kit, usually in the monitored project's `.codex/reviewer-packs/` directory or in another local checkout.
 

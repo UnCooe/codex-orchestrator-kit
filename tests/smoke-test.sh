@@ -7,9 +7,12 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 CODEX_HOME="$TMP_ROOT/.codex"
 AGENTS_HOME="$TMP_ROOT/.agents"
+FIXTURE_SINCE_DAYS=3650
 export CODEX_HOME AGENTS_HOME
 mkdir -p "$CODEX_HOME" "$AGENTS_HOME"
 cp "$ROOT/tests/fixtures/hooks.before.json" "$CODEX_HOME/hooks.json"
+mkdir -p "$CODEX_HOME/agents"
+printf '%s\n' 'name = "codebase_research_explorer"' > "$CODEX_HOME/agents/codebase-research-explorer.toml"
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN=python3
 elif command -v python >/dev/null 2>&1; then
@@ -42,6 +45,10 @@ if [[ -e "$AGENTS_HOME/skills/project-specific-observability/SKILL.md" ]]; then
 fi
 test -f "$CODEX_HOME/hooks/orchestrator_user_prompt.py"
 test -f "$CODEX_HOME/agents/critic.toml"
+if [[ -e "$CODEX_HOME/agents/codebase-research-explorer.toml" ]]; then
+  echo "Deprecated codebase-research-explorer agent should be removed during install" >&2
+  exit 1
+fi
 
 CONFIG_CODEX="$TMP_ROOT/config-codex"
 mkdir -p "$CONFIG_CODEX/skills"
@@ -358,7 +365,7 @@ JSONL
 
 "$PYTHON_BIN" "$AGENTS_HOME/skills/orchestrator-observability/scripts/analyze.py" \
   --codex-home "$CODEX_HOME" \
-  --since-days 30 \
+  --since-days "$FIXTURE_SINCE_DAYS" \
   --report-id smoke > /tmp/orchestrator-observability-smoke-report.json
 
 REPORT_DIR="$CODEX_HOME/orchestrator-observability/reports"
@@ -415,7 +422,7 @@ PY
 
 "$PYTHON_BIN" "$AGENTS_HOME/skills/orchestrator-observability/scripts/subagent_workflow.py" \
   --codex-home "$CODEX_HOME" \
-  --since-days 30 \
+  --since-days "$FIXTURE_SINCE_DAYS" \
   --report-id smoke > /tmp/subagent-workflow-smoke-report.json
 
 SUBAGENT_WORKFLOW_REPORT="$REPORT_DIR/subagent-workflow-smoke.json"
@@ -759,7 +766,7 @@ UNINSTALL_AGENTS="$TMP_ROOT/uninstall-agents"
 mkdir -p "$UNINSTALL_CODEX" "$UNINSTALL_AGENTS"
 cp "$ROOT/tests/fixtures/hooks.before.json" "$UNINSTALL_CODEX/hooks.json"
 "$ROOT/install.sh" --codex-home "$UNINSTALL_CODEX" --agents-home "$UNINSTALL_AGENTS" --apply --hook-mode auto --skills-mode auto >/dev/null
-"$ROOT/uninstall.sh" --codex-home "$UNINSTALL_CODEX" --agents-home "$UNINSTALL_AGENTS" --hook-mode auto --skills-mode auto >/dev/null
+bash "$ROOT/uninstall.sh" --codex-home "$UNINSTALL_CODEX" --agents-home "$UNINSTALL_AGENTS" --hook-mode auto --skills-mode auto >/dev/null
 if [[ -e "$UNINSTALL_AGENTS/skills/orchestrator/SKILL.md" ]]; then
   echo "uninstall.sh left orchestrator skill installed" >&2
   exit 1

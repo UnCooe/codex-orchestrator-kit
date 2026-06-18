@@ -34,16 +34,74 @@ protected_scopes = [
 # Workflow governance is capability-based by default. Keep pretool policy soft
 # unless this project really wants process-stage hard blocks.
 [workflow_profile]
+subagent_role_version = "subagent-role-v2.0"
 pretool_policy = "soft"
 hide_internal_workflow_text = true
 
+# Machine-readable workflow ledger policy. Hooks consume workflow_state fields
+# emitted in the assistant transcript; they do not rely on natural-language
+# claims as the primary completion boundary.
+[workflow_policy]
+heavy_task_requires_state = true
+tiny_direct_requires_reason = true
+split_workflow_requires_selected_skill = true
+split_workflow_requires_required_roles = true
+require_state_version = true
+require_task_identity = false
+require_workflow_stage = true
+require_role_evidence = false
+require_final_status = false
+
 [role_capabilities]
+"requirements_interpreter" = "requirements"
+"requirements-interpreter" = "requirements"
 "implementer" = "implementation"
 "worker" = "implementation"
 "reviewer" = "review"
 "critic" = "review"
 "test_designer" = "test_design"
-"test-writer" = "test_design"
+"test-designer" = "test_design"
+"test_writer" = "test_implementation"
+"test-writer" = "test_implementation"
+"test_runner" = "test_execution"
 "test-runner" = "test_execution"
+"conflict_resolver" = "conflict_resolution"
+"conflict-resolver" = "conflict_resolution"
+"deployer" = "deployment"
 "researcher" = "research"
 "explorer" = "research"
+
+[workflow_skills.feature]
+required_roles = ["implementer", "test_designer", "test_runner", "reviewer"]
+conditional_roles = ["test_writer", "researcher", "requirements_interpreter", "critic"]
+forbidden_roles = []
+one_of_roles = []
+requires_verification_commands = true
+requires_reviewer_result = true
+
+[workflow_skills.merge]
+required_roles = ["conflict_resolver", "test_runner"]
+conditional_roles = ["reviewer"]
+forbidden_roles = ["implementer"]
+one_of_roles = []
+requires_verification_commands = true
+requires_reviewer_result = false
+
+[workflow_skills.review]
+required_roles = ["reviewer"]
+conditional_roles = ["researcher", "critic"]
+forbidden_roles = ["implementer", "test_writer", "deployer"]
+one_of_roles = []
+requires_verification_commands = false
+requires_reviewer_result = true
+
+[workflow_skills.predeploy]
+required_roles = ["deployer"]
+conditional_roles = ["reviewer"]
+forbidden_roles = []
+one_of_roles = []
+requires_verification_commands = true
+requires_reviewer_result = false
+requires_current_turn_authorization = true
+fast_lanes = ["fast_pre", "fast_hotfix"]
+fast_lanes_require_roles = false
