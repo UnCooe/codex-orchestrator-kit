@@ -7,9 +7,22 @@ AGENTS_TARGET="${AGENTS_HOME:-}"
 DRY_RUN=1
 HOOK_MODE="auto"
 SKILLS_MODE="auto"
+SKILLS_ONLY=0
 AGENTS_TARGET_EXPLICIT=0
 HOOK_MODE_EXPLICIT=0
 SKILLS_MODE_EXPLICIT=0
+MANAGED_PRETOOL_SCRIPTS=(
+  critical_action_gate.py
+)
+MANAGED_SKILLS=(
+  orchestrator
+  orchestrator-observability
+  feature-workflow
+  review-workflow
+  merge-workflow
+  predeploy-workflow
+  merge-safety
+)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +43,10 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=0
       shift
       ;;
+    --skills-only)
+      SKILLS_ONLY=1
+      shift
+      ;;
     --hook-mode)
       HOOK_MODE="$2"
       HOOK_MODE_EXPLICIT=1
@@ -42,7 +59,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: install.sh [--codex-home PATH] [--agents-home PATH] [--dry-run|--apply] [--hook-mode auto|hooks_json|config_toml] [--skills-mode auto|agents|codex]" >&2
+      echo "Usage: install.sh [--codex-home PATH] [--agents-home PATH] [--dry-run|--apply] [--skills-only] [--hook-mode auto|hooks_json|config_toml] [--skills-mode auto|agents|codex]" >&2
       exit 2
       ;;
   esac
@@ -82,7 +99,7 @@ case "$SKILLS_MODE" in
 esac
 
 if [[ "$DRY_RUN" != "1" ]]; then
-  if [[ "$HOOK_MODE_EXPLICIT" != "1" ]]; then
+  if [[ "$SKILLS_ONLY" != "1" && "$HOOK_MODE_EXPLICIT" != "1" ]]; then
     echo "Apply mode requires an explicit --hook-mode value: hooks_json, config_toml, or auto" >&2
     exit 2
   fi
@@ -181,27 +198,62 @@ else
 fi
 
 echo "mode: $([[ "$DRY_RUN" == "1" ]] && printf 'dry-run' || printf 'apply')"
-echo "input: source=$SCRIPT_DIR, codex_home=$CODEX_TARGET, agents_home=$AGENTS_TARGET, hook_mode=$RESOLVED_HOOK_MODE, skills_mode=$RESOLVED_SKILLS_MODE"
-echo "install plan:"
-for plan_entry in \
-  "$SCRIPT_DIR/skills/orchestrator -> $SKILLS_TARGET_ROOT/skills/orchestrator" \
-  "$SCRIPT_DIR/skills/orchestrator-observability -> $SKILLS_TARGET_ROOT/skills/orchestrator-observability" \
-  "$SCRIPT_DIR/hooks -> $CODEX_TARGET/hooks" \
-  "$SCRIPT_DIR/agents -> $CODEX_TARGET/agents"; do
-  echo "  files: $plan_entry"
-done
-if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
-  echo "  hooks: $CODEX_TARGET/hooks.json ($([[ -f "$CODEX_TARGET/hooks.json" ]] && printf 'backup then merge' || printf 'create'))"
+if [[ "$SKILLS_ONLY" == "1" ]]; then
+  echo "input: source=$SCRIPT_DIR, codex_home=$CODEX_TARGET, agents_home=$AGENTS_TARGET, skills_mode=$RESOLVED_SKILLS_MODE, skills_only=true"
 else
-  echo "  hooks: $CODEX_TARGET/config.toml ($([[ -f "$CODEX_TARGET/config.toml" ]] && printf 'backup then merge managed block' || printf 'create managed block'))"
+  echo "input: source=$SCRIPT_DIR, codex_home=$CODEX_TARGET, agents_home=$AGENTS_TARGET, hook_mode=$RESOLVED_HOOK_MODE, skills_mode=$RESOLVED_SKILLS_MODE"
+fi
+echo "install plan:"
+for skill in "${MANAGED_SKILLS[@]}"; do
+  echo "  files: $SCRIPT_DIR/skills/$skill -> $SKILLS_TARGET_ROOT/skills/$skill"
+done
+if [[ "$SKILLS_ONLY" != "1" ]]; then
+  for script_name in "${MANAGED_PRETOOL_SCRIPTS[@]}"; do
+    echo "  files: $SCRIPT_DIR/hooks/$script_name -> $CODEX_TARGET/hooks/$script_name"
+  done
+  for plan_entry in \
+    "$SCRIPT_DIR/agents -> $CODEX_TARGET/agents"; do
+    echo "  files: $plan_entry"
+  done
+  if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
+    echo "  hooks: $CODEX_TARGET/hooks.json ($([[ -f "$CODEX_TARGET/hooks.json" ]] && printf 'backup then merge' || printf 'create'))"
+  else
+    echo "  hooks: $CODEX_TARGET/config.toml ($([[ -f "$CODEX_TARGET/config.toml" ]] && printf 'backup then merge managed entries' || printf 'create managed entries'))"
+  fi
 fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
-  mkdir -p "$CODEX_TARGET" "$CODEX_TARGET/hooks" "$CODEX_TARGET/agents" "$SKILLS_TARGET_ROOT/skills"
+  if [[ -L "$SKILLS_TARGET_ROOT/skills" ]]; then
+    echo "Refusing to install managed skills through symlink target: $SKILLS_TARGET_ROOT/skills" >&2
+    exit 1
+  fi
+  mkdir -p "$SKILLS_TARGET_ROOT/skills"
 fi
 
 backup_suffix() {
   printf '%s_%s' "$(date +%Y%m%d_%H%M%S)" "$$"
+}
+
+fail_if_symlink() {
+  local path="$1"
+  if [[ -L "$path" ]]; then
+    echo "Refusing to operate on symlink target: $path" >&2
+    exit 1
+  fi
+}
+
+fail_if_tree_contains_symlink() {
+  local root="$1"
+  if [[ ! -e "$root" ]]; then
+    return
+  fi
+  fail_if_symlink "$root"
+  local symlink
+  symlink=$(find "$root" -type l -print -quit)
+  if [[ -n "$symlink" ]]; then
+    echo "Refusing to operate on symlink target: $symlink" >&2
+    exit 1
+  fi
 }
 
 copy_sources() {
@@ -213,6 +265,7 @@ copy_sources() {
   fi
 
   if [[ "$DRY_RUN" != "1" ]]; then
+    fail_if_tree_contains_symlink "$dst_dir"
     mkdir -p "$dst_dir"
   fi
 
@@ -223,6 +276,7 @@ copy_sources() {
       echo "[DRY-RUN] $file -> $dst"
       continue
     fi
+    fail_if_symlink "$dst"
     mkdir -p "$(dirname "$dst")"
     if [[ -f "$dst" ]]; then
       local backup="${dst}.bak.$(backup_suffix)"
@@ -232,6 +286,64 @@ copy_sources() {
     cp "$file" "$dst"
     echo "installed: $dst"
   done < <(find "$src_dir" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0)
+}
+
+copy_file() {
+  local src="$1"
+  local dst="$2"
+
+  if [[ ! -f "$src" ]]; then
+    echo "Source not found: $src" >&2
+    exit 1
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[DRY-RUN] $src -> $dst"
+    return
+  fi
+
+  mkdir -p "$(dirname "$dst")"
+  fail_if_symlink "$dst"
+  if [[ -f "$dst" ]]; then
+    local backup="${dst}.bak.$(backup_suffix)"
+    cp "$dst" "$backup"
+    echo "backed up -> $backup"
+  fi
+  cp "$src" "$dst"
+  echo "installed: $dst"
+}
+
+prune_stale_skill_files() {
+  local src_dir="$1"
+  local dst_dir="$2"
+
+  if [[ ! -d "$dst_dir" ]]; then
+    return
+  fi
+  if [[ "$DRY_RUN" != "1" ]]; then
+    fail_if_tree_contains_symlink "$dst_dir"
+  fi
+
+  while IFS= read -r -d '' file; do
+    local rel="${file#"$dst_dir"/}"
+    if [[ -f "$src_dir/$rel" ]]; then
+      continue
+    fi
+    if [[ "$DRY_RUN" == "1" ]]; then
+      echo "[DRY-RUN] retire stale managed skill file: $file"
+      continue
+    fi
+    local backup="${file}.bak.$(backup_suffix)"
+    cp "$file" "$backup"
+    rm -f "$file"
+    echo "retired stale managed skill file: $file (backup: $backup)"
+  done < <(
+    find "$dst_dir" -type f \
+      ! -path '*/__pycache__/*' \
+      ! -path '*/.bak.*/*' \
+      ! -name '*.pyc' \
+      ! -name '*.bak.*' \
+      -print0
+  )
 }
 
 merge_hooks_json() {
@@ -256,6 +368,18 @@ def tokenize_command(command):
     for match in token_re.finditer(command):
         yield match.group(1) or match.group(2) or match.group(3)
 
+MANAGED_HOOK_SCRIPTS = {
+    "orchestrator_user_prompt.py",
+    "orchestrator_" + "pre_" + "tool_use.py",
+    "orchestrator_post_tool_use.py",
+    "orchestrator_stop.py",
+    "orchestrator_observability.py",
+    "workflow_profile.py",
+    "first_write_gate.py",
+    "critical_action_gate.py",
+    "pilot_receipt_gate.py",
+}
+
 def scripts_in_entry(entry):
     scripts = set()
     for hook in entry.get("hooks", []):
@@ -263,12 +387,32 @@ def scripts_in_entry(entry):
         if not isinstance(command, str):
             continue
         for token in tokenize_command(command):
-            if token and re.search(r'(?i)orchestrator_[^\\/"]+\.py$', token):
-                scripts.add(re.split(r'[\\/]', token)[-1])
+            script = re.split(r'[\\/]', token)[-1] if token else ""
+            if script.casefold() in {name.casefold() for name in MANAGED_HOOK_SCRIPTS}:
+                scripts.add(script)
     return scripts
 
+def filter_managed_hooks(entries):
+    filtered_entries = []
+    for entry in entries:
+        hooks = entry.get("hooks", [])
+        if not hooks:
+            filtered_entries.append(entry)
+            continue
+        kept = []
+        for hook in hooks:
+            names = scripts_in_entry({"hooks": [hook]})
+            if names:
+                continue
+            kept.append(hook)
+        if kept:
+            new_entry = dict(entry)
+            new_entry["hooks"] = kept
+            filtered_entries.append(new_entry)
+    return filtered_entries
+
 def merge_event_entries(existing, updates):
-    existing_entries = [dict(x) for x in existing]
+    existing_entries = filter_managed_hooks([dict(x) for x in existing])
     incoming_entries = [dict(x) for x in updates]
     incoming_scripts = set()
     for entry in incoming_entries:
@@ -307,11 +451,17 @@ except Exception:
     current = {}
 merged = {"hooks": {}}
 base = current.get("hooks", {}) if isinstance(current, dict) else {}
+base = {
+    event: filter_managed_hooks(entries)
+    for event, entries in base.items()
+}
 for event, entries in incoming.get("hooks", {}).items():
     merged["hooks"][event] = merge_event_entries(base.get(event, []), entries)
 for event, entries in base.items():
     if event not in merged["hooks"]:
-        merged["hooks"][event] = entries
+        filtered = filter_managed_hooks(entries)
+        if filtered:
+            merged["hooks"][event] = filtered
 
 if dry_run == "1":
     print(json.dumps(merged, indent=2))
@@ -331,7 +481,10 @@ merge_config_toml_hooks() {
 import json
 import re
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
 from pathlib import Path
 
 template_path, codex_home, python_cmd, output, begin_marker, end_marker, dry_run = sys.argv[1:8]
@@ -353,7 +506,12 @@ current = re.sub(managed_pattern, "", current)
 EVENT_HEADER_RE = re.compile(r"^\[\[hooks\.([A-Za-z0-9_]+)\]\]\s*$")
 SUBHOOK_HEADER_RE = re.compile(r"^\[\[hooks\.([A-Za-z0-9_]+)\.hooks\]\]\s*$")
 ANY_HEADER_RE = re.compile(r"^\[")
-ORCHESTRATOR_SCRIPT_RE = re.compile(r"orchestrator_[^\\/\"']+\.py")
+MANAGED_HOOK_SCRIPT_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])(?:orchestrator_user_prompt|orchestrator_"
+    r"pre_tool_use|orchestrator_post_tool_use|orchestrator_stop|orchestrator_observability|"
+    r"workflow_profile|first_write_gate|critical_action_gate|pilot_receipt_gate)"
+    r"\.py(?![A-Za-z0-9_.-])"
+)
 
 def split_hook_region(text):
     lines = text.splitlines(keepends=True)
@@ -422,7 +580,7 @@ def split_event_block(block_text, event):
 def normalize_block(block_text, event):
     header, subblocks = split_event_block(block_text, event)
     kept_subblocks = [
-        subblock for subblock in subblocks if not ORCHESTRATOR_SCRIPT_RE.search(subblock)
+        subblock for subblock in subblocks if not MANAGED_HOOK_SCRIPT_RE.search(subblock)
     ]
     if not kept_subblocks:
         return None
@@ -445,7 +603,7 @@ def append_managed_hook(block_text, managed_block_text, event):
     existing_joined = "\n".join(existing_subblocks)
     merged_subblocks = list(existing_subblocks)
     for subblock in managed_subblocks:
-        if ORCHESTRATOR_SCRIPT_RE.search(subblock) and ORCHESTRATOR_SCRIPT_RE.search(existing_joined):
+        if subblock in merged_subblocks:
             continue
         merged_subblocks.append(subblock)
         existing_joined += "\n" + subblock
@@ -457,45 +615,27 @@ def append_managed_hook(block_text, managed_block_text, event):
 
 prefix, hook_region, suffix = split_hook_region(current)
 existing_blocks = parse_event_blocks(hook_region)
-managed_blocks = parse_event_blocks(rendered)
-
-ordered_events = []
-merged_blocks = {}
+merged_blocks = []
 for event, block_text in existing_blocks:
     normalized = normalize_block(block_text, event)
-    if normalized is None:
-        continue
-    if event not in ordered_events:
-        ordered_events.append(event)
-        merged_blocks[event] = normalized
-    else:
-        merged_blocks[event] = append_managed_hook(
-            merged_blocks[event], normalized, event
-        )
-
-for event, block_text in managed_blocks:
-    if event not in ordered_events:
-        ordered_events.append(event)
-        merged_blocks[event] = block_text.rstrip() + "\n"
-    else:
-        merged_blocks[event] = append_managed_hook(
-            merged_blocks[event], block_text, event
-        )
+    if normalized is not None:
+        merged_blocks.append(normalized.rstrip())
+merged_blocks.append(rendered.strip())
 
 sections = []
 if prefix:
     sections.append(prefix.rstrip())
-if ordered_events:
-    hook_text = "\n\n".join(merged_blocks[event].rstrip() for event in ordered_events)
-    sections.append(hook_text.rstrip())
+if merged_blocks:
+    sections.append("\n\n".join(block for block in merged_blocks if block).rstrip())
 if suffix:
     sections.append(suffix.rstrip())
 new_text = "\n\n".join(section for section in sections if section) + "\n"
 
-try:
-    tomllib.loads(new_text)
-except tomllib.TOMLDecodeError as exc:
-    raise SystemExit(f"generated invalid config.toml: {exc}")
+if tomllib is not None:
+    try:
+        tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"generated invalid config.toml: {exc}")
 
 if dry_run == "1":
     print(new_text)
@@ -504,13 +644,25 @@ else:
 PY
 }
 
-copy_sources "$SCRIPT_DIR/skills/orchestrator" "$SKILLS_TARGET_ROOT/skills/orchestrator"
-copy_sources "$SCRIPT_DIR/skills/orchestrator-observability" "$SKILLS_TARGET_ROOT/skills/orchestrator-observability"
-copy_sources "$SCRIPT_DIR/skills/feature-workflow" "$SKILLS_TARGET_ROOT/skills/feature-workflow"
-copy_sources "$SCRIPT_DIR/skills/merge-workflow" "$SKILLS_TARGET_ROOT/skills/merge-workflow"
-copy_sources "$SCRIPT_DIR/skills/review-workflow" "$SKILLS_TARGET_ROOT/skills/review-workflow"
-copy_sources "$SCRIPT_DIR/skills/predeploy-workflow" "$SKILLS_TARGET_ROOT/skills/predeploy-workflow"
-copy_sources "$SCRIPT_DIR/hooks" "$CODEX_TARGET/hooks"
+for skill in "${MANAGED_SKILLS[@]}"; do
+  prune_stale_skill_files "$SCRIPT_DIR/skills/$skill" "$SKILLS_TARGET_ROOT/skills/$skill"
+  copy_sources "$SCRIPT_DIR/skills/$skill" "$SKILLS_TARGET_ROOT/skills/$skill"
+done
+
+verify_skill_only_install() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    return
+  fi
+  "${PYTHON_RUN[@]}" "$SCRIPT_DIR/scripts/verify_skill_install.py" --source "$SCRIPT_DIR/skills" --target "$SKILLS_TARGET_ROOT/skills"
+}
+
+verify_skill_only_install
+
+if [[ "$SKILLS_ONLY" == "1" ]]; then
+  echo "done"
+  exit 0
+fi
+
 copy_sources "$SCRIPT_DIR/agents" "$CODEX_TARGET/agents"
 
 remove_deprecated_agent() {
@@ -529,11 +681,40 @@ remove_deprecated_agent() {
 
 remove_deprecated_agent "codebase-research-explorer.toml"
 
+verify_skill_install() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    return
+  fi
+  "${PYTHON_RUN[@]}" "$SCRIPT_DIR/scripts/verify_skill_install.py" \
+    --source "$SCRIPT_DIR/skills" \
+    --target "$SKILLS_TARGET_ROOT/skills" \
+    --source-agents "$SCRIPT_DIR/agents" \
+    --target-agents "$CODEX_TARGET/agents"
+}
+
+verify_skill_install
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  fail_if_tree_contains_symlink "$CODEX_TARGET/hooks"
+  if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
+    fail_if_symlink "$CODEX_TARGET/hooks.json"
+  else
+    fail_if_symlink "$CODEX_TARGET/config.toml"
+  fi
+fi
+
+for script_name in "${MANAGED_PRETOOL_SCRIPTS[@]}"; do
+  copy_file \
+    "$SCRIPT_DIR/hooks/$script_name" \
+    "$CODEX_TARGET/hooks/$script_name"
+done
+
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "[DRY-RUN] hook_mode=$RESOLVED_HOOK_MODE skills_mode=$RESOLVED_SKILLS_MODE skills_root=$SKILLS_TARGET_ROOT"
 fi
 
 if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
+  fail_if_symlink "$CODEX_TARGET/hooks.json"
   if [[ "$DRY_RUN" != "1" && -f "$CODEX_TARGET/hooks.json" ]]; then
     hook_backup="$CODEX_TARGET/hooks.json.bak.$(backup_suffix)"
     cp "$CODEX_TARGET/hooks.json" "$hook_backup"
@@ -542,6 +723,7 @@ if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
   merge_hooks_json >/dev/null
   [[ "$DRY_RUN" == "1" ]] || echo "installed: $CODEX_TARGET/hooks.json"
 else
+  fail_if_symlink "$CODEX_TARGET/config.toml"
   if [[ "$DRY_RUN" != "1" && -f "$CODEX_TARGET/config.toml" ]]; then
     config_backup="$CODEX_TARGET/config.toml.bak.$(backup_suffix)"
     cp "$CODEX_TARGET/config.toml" "$config_backup"

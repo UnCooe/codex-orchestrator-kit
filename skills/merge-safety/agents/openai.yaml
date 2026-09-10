@@ -1,0 +1,6 @@
+interface:
+  display_name: "Merge Safety"
+  short_description: "Guard merge, rebase, cherry-pick, and protected-branch integration work."
+  default_prompt: "Use merge safety to plan the integration, run merge_guard gates, record evidence, and report next_action."
+policy:
+  allow_implicit_invocation: false

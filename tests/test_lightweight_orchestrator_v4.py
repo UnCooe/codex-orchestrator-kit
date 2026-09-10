@@ -12,7 +12,6 @@ ORCHESTRATOR_SKILL = ROOT / "skills" / "orchestrator" / "SKILL.md"
 FEATURE_WORKFLOW_SKILL = ROOT / "skills" / "feature-workflow" / "SKILL.md"
 SUBAGENT_PROMPTS = ROOT / "skills" / "orchestrator" / "references" / "subagent-prompts.md"
 GLOBAL_TEMPLATE = ROOT / "templates" / "global-agents.md"
-WORKFLOW_PROFILE = ROOT / "hooks" / "workflow_profile.py"
 HOOK_TEMPLATES = [
     ROOT / "templates" / "hooks.json.tpl",
     ROOT / "templates" / "config.toml_hooks.tpl",
@@ -125,17 +124,6 @@ class LightweightOrchestratorV4PolicyContractTests(unittest.TestCase):
         self.assertNotRegex(text, r"required_roles\s*=\s*implementer,test_designer,test_runner,reviewer")
         self.assertNotRegex(text, r"default required roles(?:\W+\w+){0,16}\W+implementer")
         self.assertNotIn("test_runner remains required", text)
-
-    def test_workflow_profile_feature_and_bugfix_defaults_are_empty_and_evidence_gated(self) -> None:
-        module = _load_module(WORKFLOW_PROFILE, "workflow_profile_v4_contract")
-
-        for skill in ("feature", "bugfix"):
-            with self.subTest(skill=skill):
-                requirements = module.DEFAULT_SKILL_REQUIREMENTS[skill]
-                self.assertEqual(requirements["required_roles"], [])
-                self.assertEqual(requirements.get("delegation_policy"), "outcome_based")
-                self.assertTrue(requirements["requires_verification_commands"])
-                self.assertTrue(requirements["requires_reviewer_result"])
 
     def test_global_template_does_not_require_every_named_capability_as_a_separate_agent(self) -> None:
         text = _text(GLOBAL_TEMPLATE).lower()

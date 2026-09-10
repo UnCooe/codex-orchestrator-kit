@@ -1,0 +1,43 @@
+{
+  "version": "critical-gate-fixture-v2",
+  "protected_refs": ["pre", "test", "master", "main", "release/*"],
+  "server_policy": {
+    "environment_aliases": {
+      "prod": ["prod", "production", "正式", "生产", "线上"],
+      "pre": ["pre", "staging", "预发", "预发布"],
+      "test": ["test", "testing", "测试"]
+    },
+    "action_aliases": {
+      "deploy": ["deploy", "部署", "发布", "上线"],
+      "restart": ["restart", "重启", "重启服务"],
+      "git": ["git", "更新代码", "拉取代码", "切换分支"],
+      "emergency_bypass": ["emergency bypass", "bypass prodctl", "紧急绕过", "应急直连"]
+    },
+    "hosts": {
+      "app-prod-1": {
+        "env": "prod",
+        "aliases": ["production app host", "正式应用机器", "生产应用机器"],
+        "allowed_app_dirs": ["/srv/example-app"],
+        "services": ["example-app"]
+      },
+      "app-pre-1": {
+        "env": "pre",
+        "aliases": ["pre app host", "预发应用机器"],
+        "allowed_app_dirs": ["/srv/example-app"],
+        "services": ["example-app"]
+      },
+      "app-test-1": {
+        "env": "test",
+        "aliases": ["test app host", "测试应用机器"],
+        "allowed_app_dirs": ["/srv/example-app"],
+        "services": ["example-app"]
+      }
+    },
+    "prodctl": {
+      "required_for_envs": ["prod"],
+      "preferred_for_envs": ["pre", "test"],
+      "read_actions": ["status", "version", "plan-deploy", "plan-config"],
+      "write_actions": ["deploy", "restart", "restart-service", "apply-config"]
+    }
+  }
+}

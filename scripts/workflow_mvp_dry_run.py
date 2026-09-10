@@ -17,6 +17,7 @@ PLANNED_SKILLS = [
     "skills/merge-workflow",
     "skills/review-workflow",
     "skills/predeploy-workflow",
+    "skills/merge-safety",
     "skills/orchestrator-observability",
 ]
 
@@ -34,11 +35,7 @@ PLANNED_AGENTS = [
 ]
 
 PLANNED_HOOKS = [
-    "hooks/orchestrator_pre_tool_use.py",
-    "hooks/orchestrator_stop.py",
-    "hooks/orchestrator_post_tool_use.py",
-    "hooks/orchestrator_user_prompt.py",
-    "hooks/orchestrator_observability.py",
+    "hooks/critical_action_gate.py",
 ]
 
 DEPRECATED_GLOBAL_AGENTS = [
@@ -53,14 +50,15 @@ SCENARIOS = {
         "task_class": "feature",
         "selected_skill": "feature",
         "stage": "planning",
-        "required_roles": ["implementer", "test_designer", "test_runner", "reviewer"],
+        "required_roles": [],
+        "delegation_policy": "outcome_based",
         "conditional_roles": ["test_writer", "researcher", "requirements_interpreter", "critic"],
         "role_evidence": {
             "test_designer": {"implementation_diff_visible": False, "sources_read": ["Requirement Contract", "public API/test style"]},
             "test_runner": {"status": "not_run", "commands": []},
             "reviewer": {"result": "not_run"},
         },
-        "must_record": ["spawned_roles", "waited_roles", "closed_roles", "verification_commands", "reviewer_result"],
+        "must_record": ["implementation_owner", "verification_commands", "reviewer_result", "branch_discipline"],
         "final_status": None,
     },
     "merge": {
