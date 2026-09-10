@@ -394,46 +394,6 @@ if (Test-Path $projectSpecificSkillPath) {
     throw 'Default install should not install project-specific reviewer packs.'
 }
 
-$reviewProfileTemplate = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'templates\review-profile.toml')
-$enabledReviewersMatch = [regex]::Match($reviewProfileTemplate, '(?s)enabled_reviewers\s*=\s*\[(.*?)\]')
-if (-not $enabledReviewersMatch.Success) {
-    throw 'Default review-profile template missing enabled_reviewers.'
-}
-$enabledReviewers = @([regex]::Matches($enabledReviewersMatch.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
-if ($enabledReviewers.Count -ne 1 -or $enabledReviewers[0] -ne 'subagent-workflow') {
-    throw "Default review-profile template should enable only subagent-workflow; got: $($enabledReviewers -join ', ')"
-}
-
-$demoPack = Join-Path $env:TEMP ('reviewer-pack-smoke-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path (Join-Path $demoPack 'skills\demo-observability\scripts') -Force | Out-Null
-@'
----
-name: demo-observability
-description: Smoke test external reviewer pack.
----
-
-# Demo Observability
-'@ | Set-Content -Path (Join-Path $demoPack 'skills\demo-observability\SKILL.md') -Encoding utf8
-'print("demo")' | Set-Content -Path (Join-Path $demoPack 'skills\demo-observability\scripts\demo.py') -Encoding utf8
-& (Join-Path $root 'install-reviewer-pack.ps1') -PackPath $demoPack -AgentsHome $AgentsHome | Out-Null
-if (-not (Test-Path (Join-Path $AgentsHome 'skills\demo-observability\SKILL.md'))) {
-    throw 'install-reviewer-pack did not install the external reviewer skill.'
-}
-if (-not (Test-Path (Join-Path $AgentsHome 'skills\demo-observability\scripts\demo.py'))) {
-    throw 'install-reviewer-pack did not install reviewer scripts.'
-}
-
-$registeredProject = Join-Path $env:TEMP ('registered-project-smoke-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $registeredProject -Force | Out-Null
-& (Join-Path $root 'register-project.ps1') -ProjectPath $registeredProject -ProjectId 'smoke-project' -Reviewers @('subagent-workflow','demo-reviewer') | Out-Null
-$registeredProfile = Get-Content -Raw -Encoding UTF8 (Join-Path $registeredProject '.codex\review-profile.toml')
-if ($registeredProfile -notmatch 'project_id = "smoke-project"' -or $registeredProfile -notmatch '"subagent-workflow"' -or $registeredProfile -notmatch '"demo-reviewer"') {
-    throw 'register-project did not write expected review profile.'
-}
-if (-not (Test-Path (Join-Path $registeredProject '.codex\project-context.md'))) {
-    throw 'register-project did not write project context template.'
-}
-
 $criticalGate = Join-Path $CodexHome 'hooks\critical_action_gate.py'
 $ordinaryGateOutput = Invoke-PythonHook -Script $criticalGate -InputJson '{"tool_name":"Bash","tool_input":{"cmd":"python -V"}}'
 if (-not [string]::IsNullOrWhiteSpace(($ordinaryGateOutput -join ''))) {

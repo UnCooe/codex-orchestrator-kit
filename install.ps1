@@ -236,13 +236,20 @@ function Test-ReparsePoint {
     return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
-function Assert-NoReparsePoint {
+function Assert-ExactPathNotReparse {
     param([Parameter(Mandatory)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) { return }
     if (Test-ReparsePoint -Path $Path) {
         throw "Refusing to operate on reparse/symlink target: $Path"
     }
+}
+
+function Assert-NoReparsePoint {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Assert-ExactPathNotReparse -Path $Path
     foreach ($item in (Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Refusing to operate on reparse/symlink target: $($item.FullName)"
@@ -274,8 +281,8 @@ function Stage-Files {
 
     if (-not $Recurse) {
         $destDir = Split-Path $Destination -Parent
-        if (-not $InstallDryRun) { Assert-NoReparsePoint -Path $Destination }
-        if (-not $InstallDryRun) { Assert-NoReparsePoint -Path $destDir }
+        if (-not $InstallDryRun) { Assert-ExactPathNotReparse -Path $Destination }
+        if (-not $InstallDryRun) { Assert-ExactPathNotReparse -Path $destDir }
         if ((-not $InstallDryRun) -and (Test-Path $Destination)) { Backup-Path -Path $Destination }
         if ($InstallDryRun) {
             Write-Host "[DRY-RUN] $Source -> $Destination"
@@ -694,7 +701,15 @@ function Merge-ConfigTomlHooks {
         $parts = Split-EventBlock -BlockText $BlockText -Event $Event
         $kept = [System.Collections.Generic.List[string]]::new()
         foreach ($subblock in $parts.Subblocks) {
-            if ($subblock -notmatch $managedHookScriptRegex) {
+            $hasActiveManagedHook = $false
+            foreach ($line in [regex]::Split($subblock, "`r?`n")) {
+                if ($line.TrimStart().StartsWith('#')) { continue }
+                if ($line -match $managedHookScriptRegex) {
+                    $hasActiveManagedHook = $true
+                    break
+                }
+            }
+            if (-not $hasActiveManagedHook) {
                 $kept.Add($subblock)
             }
         }
@@ -863,7 +878,7 @@ Invoke-SkillInstallVerifier -PythonCommand $PythonCommand `
     -SourceAgentsRoot (Join-Path $scriptRoot 'agents') `
     -TargetAgentsRoot (Join-Path $CodexHome 'agents')
 
-if (-not $InstallDryRun) { Assert-NoReparsePoint -Path (Join-Path $CodexHome 'hooks') }
+if (-not $InstallDryRun) { Assert-ExactPathNotReparse -Path (Join-Path $CodexHome 'hooks') }
 
 foreach ($scriptName in $managedPreToolScripts) {
     Stage-Files `

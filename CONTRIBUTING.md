@@ -9,8 +9,8 @@ keep local installation explicit, reversible, and privacy-bounded.
 - PowerShell 7 or Windows PowerShell for the Windows smoke test
 - Bash for the Unix-like smoke test
 
-Windows PowerShell is the primary supported path. Unix-like support is
-best-effort and must stay covered by smoke tests.
+Unix-like and PowerShell installers share the same managed-file contract. The Bash
+path is validated locally; PowerShell changes must also pass the Windows smoke test.
 
 ## Validation
 
@@ -32,8 +32,9 @@ python tests/hygiene_check.py
 
 - Installers must default to dry-run.
 - Writes require explicit `-Apply` or `--apply`.
-- Apply mode must require explicit hook and skills mode values, including an
-  explicit `auto` if auto-detection is intended.
+- Full apply mode must require explicit hook and skills mode values, including an
+  explicit `auto` if auto-detection is intended. Skills-only mode requires only an
+  explicit skills mode.
 - Install and uninstall paths must print the target homes, selected modes, and
   files that will be written, backed up, or removed.
 - Tests must install only into temporary homes.
@@ -45,7 +46,7 @@ Before merging, check that no private runtime data is tracked:
 - `.codex/sessions/`
 - `.codex/orchestrator-observability/`
 - generated reports, triage state, and proposal patches
-- real project context or reviewer packs
+- real project context
 - `.env`, private keys, certificates, or local backup files
 
 Synthetic fixture secrets and paths are allowed only when they are clearly test

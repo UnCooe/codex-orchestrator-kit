@@ -577,10 +577,16 @@ def split_event_block(block_text, event):
         subblocks.append("".join(current_subblock))
     return "".join(header), subblocks
 
+def subblock_has_managed_hook(subblock):
+    return any(
+        not line.lstrip().startswith("#") and MANAGED_HOOK_SCRIPT_RE.search(line)
+        for line in subblock.splitlines()
+    )
+
 def normalize_block(block_text, event):
     header, subblocks = split_event_block(block_text, event)
     kept_subblocks = [
-        subblock for subblock in subblocks if not MANAGED_HOOK_SCRIPT_RE.search(subblock)
+        subblock for subblock in subblocks if not subblock_has_managed_hook(subblock)
     ]
     if not kept_subblocks:
         return None
@@ -695,7 +701,7 @@ verify_skill_install() {
 verify_skill_install
 
 if [[ "$DRY_RUN" != "1" ]]; then
-  fail_if_tree_contains_symlink "$CODEX_TARGET/hooks"
+  fail_if_symlink "$CODEX_TARGET/hooks"
   if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
     fail_if_symlink "$CODEX_TARGET/hooks.json"
   else

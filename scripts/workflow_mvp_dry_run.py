@@ -216,7 +216,6 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
             "skills": existing(PLANNED_SKILLS),
             "agents": existing(PLANNED_AGENTS),
             "hooks": existing(PLANNED_HOOKS),
-            "templates": existing(["templates/review-profile.toml"]),
             "deprecated_global_agents_removed_on_apply": existing(DEPRECATED_GLOBAL_AGENTS),
         },
         "scenario_ledgers": scenarios,

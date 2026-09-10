@@ -281,7 +281,11 @@ while index < len(lines):
             subblock.append(lines[index])
             index += 1
         subblock_text = "".join(subblock)
-        if not managed.search(subblock_text):
+        has_active_managed_hook = any(
+            not line.lstrip().startswith("#") and managed.search(line)
+            for line in subblock_text.splitlines()
+        )
+        if not has_active_managed_hook:
             subblocks.append(subblock_text)
 
     if subblocks:
@@ -303,7 +307,7 @@ if [[ "$SKILLS_ONLY" != "1" ]]; then
 fi
 
 if [[ "$SKILLS_ONLY" != "1" ]]; then
-  fail_if_tree_contains_symlink "$CODEX_TARGET/hooks"
+  fail_if_symlink "$CODEX_TARGET/hooks"
   if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
     HOOK_SURFACE="$CODEX_TARGET/hooks.json"
     fail_if_symlink "$HOOK_SURFACE"

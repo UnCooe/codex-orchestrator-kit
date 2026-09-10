@@ -31,9 +31,10 @@ This kit stays intentionally small. The goal is to borrow practical orchestratio
 
 ## Current Design Choice
 
-Codex Desktop portability is handled as a plain kit first:
+Codex Desktop portability is handled as a file-based kit:
 
-- hooks and custom agents install under `~/.codex`
-- global skills install under `~/.agents`
-- hook commands are rendered from `templates/hooks.json.tpl`
-- plugin packaging is deferred until install, uninstall, smoke tests, and documentation are stable
+- skills install under the selected Codex or Agents skill root;
+- optional role templates install under the selected Codex home;
+- exactly one kit runtime hook, `critical_action_gate.py`, is registered;
+- observability stays offline and does not add lifecycle hooks;
+- plugin packaging remains deferred until the portable installer contract is stable.

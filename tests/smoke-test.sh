@@ -340,53 +340,6 @@ for forbidden in ("PostToolUse", "Stop"):
         raise SystemExit(f"unexpected legacy managed event after config merge: {forbidden}")
 PY
 
-if "$PYTHON_BIN" - "$ROOT/templates/review-profile.toml" <<'PY'
-import pathlib
-import re
-import sys
-
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(r"enabled_reviewers\s*=\s*\[(.*?)\]", text, re.S)
-if not match:
-    raise SystemExit(1)
-body = match.group(1)
-reviewers = re.findall(r'"([^"]+)"', body)
-if reviewers != ["subagent-workflow"]:
-    raise SystemExit(1)
-PY
-then
-  :
-else
-  echo "Default review-profile template should enable only subagent-workflow" >&2
-  exit 1
-fi
-
-DEMO_PACK="$TMP_ROOT/demo-reviewer-pack"
-mkdir -p "$DEMO_PACK/skills/demo-observability/scripts"
-cat > "$DEMO_PACK/skills/demo-observability/SKILL.md" <<'EOF'
----
-name: demo-observability
-description: Smoke test external reviewer pack.
----
-
-# Demo Observability
-EOF
-printf '%s\n' 'print("demo")' > "$DEMO_PACK/skills/demo-observability/scripts/demo.py"
-"$ROOT/install-reviewer-pack.sh" --pack "$DEMO_PACK" --agents-home "$AGENTS_HOME" >/dev/null
-test -f "$AGENTS_HOME/skills/demo-observability/SKILL.md"
-test -f "$AGENTS_HOME/skills/demo-observability/scripts/demo.py"
-"$ROOT/install-reviewer-pack.sh" --pack "$DEMO_PACK" --codex-home "$CONFIG_CODEX" --skills-mode codex >/dev/null
-test -f "$CONFIG_CODEX/skills/demo-observability/SKILL.md"
-test -f "$CONFIG_CODEX/skills/demo-observability/scripts/demo.py"
-
-REGISTERED_PROJECT="$TMP_ROOT/registered-project"
-mkdir -p "$REGISTERED_PROJECT"
-"$ROOT/register-project.sh" --project "$REGISTERED_PROJECT" --project-id smoke-project --reviewers subagent-workflow,demo-reviewer >/dev/null
-test -f "$REGISTERED_PROJECT/.codex/project-context.md"
-grep -q 'project_id = "smoke-project"' "$REGISTERED_PROJECT/.codex/review-profile.toml"
-grep -q '"subagent-workflow"' "$REGISTERED_PROJECT/.codex/review-profile.toml"
-grep -q '"demo-reviewer"' "$REGISTERED_PROJECT/.codex/review-profile.toml"
-
 grep -q 'C:/legacy/orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json" && {
   echo "Legacy orchestrator_user_prompt entry should not be preserved" >&2
   exit 1

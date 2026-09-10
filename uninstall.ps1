@@ -68,13 +68,20 @@ function Test-ReparsePoint {
     return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
-function Assert-NoReparsePoint {
+function Assert-ExactPathNotReparse {
     param([Parameter(Mandatory)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) { return }
     if (Test-ReparsePoint -Path $Path) {
         throw "Refusing to operate on reparse/symlink target: $Path"
     }
+}
+
+function Assert-NoReparsePoint {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Assert-ExactPathNotReparse -Path $Path
     foreach ($item in (Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Refusing to operate on reparse/symlink target: $($item.FullName)"
@@ -185,7 +192,15 @@ function Remove-ConfigTomlManagedHooks {
             }
 
             $subblockText = ($subblock -join '')
-            if ($subblockText -notmatch $managedScriptPattern) {
+            $hasActiveManagedHook = $false
+            foreach ($subblockLine in [regex]::Split($subblockText, "`r?`n")) {
+                if ($subblockLine.TrimStart().StartsWith('#')) { continue }
+                if ($subblockLine -match $managedScriptPattern) {
+                    $hasActiveManagedHook = $true
+                    break
+                }
+            }
+            if (-not $hasActiveManagedHook) {
                 $subblocks.Add($subblockText)
             }
         }
@@ -269,7 +284,7 @@ if (-not $SkillsOnly.IsPresent) {
 }
 
 if (-not $SkillsOnly.IsPresent) {
-    Assert-NoReparsePoint -Path (Join-Path $CodexHome 'hooks')
+    Assert-ExactPathNotReparse -Path (Join-Path $CodexHome 'hooks')
     if ($ResolvedHookMode -eq 'hooks_json') {
         $hooksPath = Join-Path $CodexHome 'hooks.json'
         Assert-NoReparsePoint -Path $hooksPath

@@ -16,9 +16,13 @@ FORBIDDEN_TRACKED = (
     re.compile(r"\.bak\."),
 )
 
+WINDOWS_USER_PREFIX = "C:" + "\\\\" + "Users" + "\\\\"
+POSIX_USER_PREFIX = "/" + "Users" + "/"
+REAL_USER_SEGMENT = r"(?!example(?:[\\/]|$)|path(?:[\\/]|$)|\.\.\.(?:[\\/]|$))[A-Za-z0-9._-]+"
+
 FORBIDDEN_CONTENT = (
-    re.compile(r"C:\\Users\\31947", re.IGNORECASE),
-    re.compile(r"/Users/31947", re.IGNORECASE),
+    re.compile(re.escape(WINDOWS_USER_PREFIX) + REAL_USER_SEGMENT, re.IGNORECASE),
+    re.compile(re.escape(POSIX_USER_PREFIX) + REAL_USER_SEGMENT),
     re.compile(r"BEGIN (RSA|DSA|EC|OPENSSH|PRIVATE) KEY"),
 )
 
@@ -30,14 +34,18 @@ ALLOW_SYNTHETIC = {
 }
 
 
-def git_ls_files() -> list[str]:
-    output = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True)
+def repo_source_files() -> list[str]:
+    output = subprocess.check_output(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT,
+        text=True,
+    )
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
 def main() -> int:
     failures: list[str] = []
-    tracked = git_ls_files()
+    tracked = repo_source_files()
 
     for rel in tracked:
         normalized = rel.replace("\\", "/")

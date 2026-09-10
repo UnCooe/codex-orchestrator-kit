@@ -541,6 +541,77 @@ class InstallHookContractTests(unittest.TestCase):
                 self.assertTrue(protected_link.is_symlink(), proc.stdout + proc.stderr)
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
+    def test_bash_full_install_and_uninstall_allow_unmanaged_hook_symlink_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex"
+            hooks = codex_home / "hooks"
+            hooks.mkdir(parents=True)
+            external_hook = root / "external-session-hook.py"
+            external_hook.write_text('print("external")\n', encoding="utf-8")
+            unmanaged_link = hooks / "aiserver_session_context.py"
+            unmanaged_link.symlink_to(external_hook)
+
+            proc = _run_bash("install.sh", *_install_args(root, "config_toml"))
+
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue(unmanaged_link.is_symlink())
+            self.assertEqual(unmanaged_link.resolve(), external_hook.resolve())
+            self.assertTrue((hooks / "critical_action_gate.py").is_file())
+
+            uninstall = _run_bash("uninstall.sh", *_uninstall_args(root, "config_toml"))
+
+            self.assertEqual(uninstall.returncode, 0, uninstall.stdout + uninstall.stderr)
+            self.assertTrue(unmanaged_link.is_symlink())
+            self.assertEqual(unmanaged_link.resolve(), external_hook.resolve())
+            self.assertFalse((hooks / "critical_action_gate.py").exists())
+
+    def test_bash_config_merge_preserves_external_hook_with_commented_managed_history(self) -> None:
+        for script, args_builder in (("install.sh", _install_args), ("uninstall.sh", _uninstall_args)):
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                codex_home = root / "codex"
+                codex_home.mkdir(parents=True)
+                config = codex_home / "config.toml"
+                config.write_text(
+                    """
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "python3 /opt/project/hooks/aiserver_session_context.py"
+timeout = 10
+
+# [[hooks.UserPromptSubmit.hooks]]
+# type = "command"
+# command = "python3 /opt/project/hooks/orchestrator_user_prompt.py"
+# timeout = 10
+
+[[hooks.PreToolUse]]
+matcher = "^(Bash|exec_command)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 /opt/project/hooks/critical_action_gate.py"
+timeout = 10
+""".lstrip(),
+                    encoding="utf-8",
+                )
+
+                proc = _run_bash(script, *args_builder(root, "config_toml"))
+
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+                user_prompt_commands = [
+                    hook["command"]
+                    for entry in parsed["hooks"]["UserPromptSubmit"]
+                    for hook in entry["hooks"]
+                ]
+                self.assertEqual(
+                    user_prompt_commands,
+                    ["python3 /opt/project/hooks/aiserver_session_context.py"],
+                )
+
     def test_bash_full_uninstall_fails_closed_on_hook_and_surface_symlinks(self) -> None:
         scenarios = (
             ("hooks-parent", "hooks_json", None),
