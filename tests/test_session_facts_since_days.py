@@ -166,6 +166,62 @@ class SessionFactSinceDaysTests(unittest.TestCase):
             self.assertEqual(stats["filtered_files"], 0)
             self.assertEqual({fact.session_id for fact in facts}, {"old-path-fresh-mtime", "fresh-path-old-mtime"})
 
+    def test_fork_history_and_exact_cross_file_duplicates_are_not_recounted(self) -> None:
+        cutoff = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir) / ".codex"
+            sessions = codex_home / "sessions" / "2026" / "05" / "02"
+            original = sessions / "rollout-2026-05-02T000000-original.jsonl"
+            fork = sessions / "rollout-2026-05-02T010000-original_fork.jsonl"
+            shared = {
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "call_id": "shared-call",
+                    "arguments": "{}",
+                },
+                "timestamp": "2026-05-02T01:00:01Z",
+            }
+            _write_jsonl(
+                original,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "original", "cwd": "/repo/original"},
+                        "timestamp": "2026-05-02T00:00:00Z",
+                    },
+                    shared,
+                ],
+            )
+            _write_jsonl(
+                fork,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "fork", "cwd": "/repo/fork"},
+                        "timestamp": "2026-05-02T01:00:00Z",
+                    },
+                    {
+                        "payload": {"type": "message", "role": "assistant", "content": "copied history"},
+                        "timestamp": "2026-05-02T00:30:00Z",
+                    },
+                    {**shared, "session_id": "fork"},
+                    {
+                        "payload": {"type": "message", "role": "assistant", "content": "new fork work"},
+                        "timestamp": "2026-05-02T01:00:02Z",
+                    },
+                ],
+            )
+
+            facts, stats = extract_facts([fork, original], codex_home, cutoff)
+
+        self.assertEqual(stats["fork_history_records_skipped"], 1)
+        self.assertEqual(stats["duplicate_records_skipped"], 1)
+        self.assertEqual(
+            [fact.event_type for fact in facts],
+            ["transcript_session_meta", "transcript_subagent_spawn_agent", "transcript_session_meta", "transcript_message_assistant"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

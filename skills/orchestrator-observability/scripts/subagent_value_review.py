@@ -24,11 +24,13 @@ from session_facts import (
     scan_observability_event_files,
     stringify_text,
 )
+from task_tree import analyze_session_tree
 
 
 SCHEMA_VERSION = "subagent-value-review-v2"
 MAX_SUMMARY_CHARS = 500
 MAX_PACKET_TEXT = 6000
+MAX_EMBEDDED_EPISODES = 500
 POST_WAIT_EVENT_WINDOW = 14
 LARGE_OUTPUT_CHARS = 60000
 VERBOSE_RESULT_CHARS = 12000
@@ -596,7 +598,11 @@ def build_episodes(events: list[Event]) -> tuple[list[Episode], list[dict[str, A
                 if event.tool_name == "spawn_agent":
                     session_has_spawn = True
                     brief = extract_brief(event.arguments)
-                    role = str(event.arguments.get("agent_type") or event.arguments.get("role") or event.arguments.get("name") or "default")
+                    declared_role = re.search(r"(?im)^Role:\s*([^\n.]+)", brief)
+                    role = str(
+                        declared_role.group(1).strip()
+                        if declared_role else event.arguments.get("agent_type") or event.arguments.get("role") or event.arguments.get("name") or "default"
+                    )
                     delegation_id = f"{session_id}:spawn:{len(episodes_by_call) + 1}"
                     episode = Episode(
                         delegation_id=delegation_id,
@@ -1385,6 +1391,8 @@ def build_report(
     now = datetime.now(timezone.utc)
     cutoff = since_ts.astimezone(timezone.utc) if since_ts else now - timedelta(days=since_days)
     events, stats = iter_events(codex_home, cutoff, include_paths=include_paths)
+    session_files = list(scan_session_files(codex_home, cutoff=cutoff))
+    task_tree_summary = analyze_session_tree(session_files)
     episodes, missed_candidates = build_episodes(events)
     issue_groups = build_issue_groups(episodes, missed_candidates)
     classification, overall_score, confidence = classify_overall_from_issues(episodes, issue_groups)
@@ -1394,6 +1402,8 @@ def build_report(
     class_counts = Counter(ep.classification for ep in episodes)
 
     packets = [packet_for_episode(ep) for ep in sorted(episodes, key=lambda item: item.scores.get("net_utility", 0))[:max_packets]]
+    report_episodes = episodes[-MAX_EMBEDDED_EPISODES:]
+    report_missed_candidates = missed_candidates[-MAX_EMBEDDED_EPISODES:]
     data = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now.isoformat().replace("+00:00", "Z"),
@@ -1418,15 +1428,25 @@ def build_report(
             "missed_use_candidates": len(missed_candidates),
             "consumed_episodes": sum(1 for ep in episodes if ep.consumed),
             "closed_episodes": sum(1 for ep in episodes if ep.close_ref),
+            "current_task_tree_open_children": task_tree_summary["aggregate"].get("open_children", 0),
+            "current_task_tree_completed_children": task_tree_summary["aggregate"].get("completed_children", 0),
+            "current_task_tree_peak_active_children": task_tree_summary["aggregate"].get("peak_active_children", 0),
         },
         "classification_counts": dict(class_counts),
         "issue_groups": issue_groups,
-        "subagents": [episode_to_json(ep) for ep in episodes],
-        "missed_use_candidates": missed_candidates,
+        "episode_output": {
+            "limit": MAX_EMBEDDED_EPISODES,
+            "emitted": len(report_episodes),
+            "omitted": max(0, len(episodes) - len(report_episodes)),
+            "truncated": len(episodes) > len(report_episodes),
+        },
+        "subagents": [episode_to_json(ep) for ep in report_episodes],
+        "task_tree": task_tree_summary,
+        "missed_use_candidates": report_missed_candidates,
         "selected_packets": packets,
         "debug_artifact": {
-            "episodes": [episode_to_json(ep) for ep in episodes],
-            "missed_candidates": missed_candidates,
+            "episodes": [episode_to_json(ep) for ep in report_episodes],
+            "missed_candidates": report_missed_candidates,
             "heuristic_hits": {
                 "overlong_result": sum(1 for ep in episodes if ep.result_chars > VERBOSE_RESULT_CHARS),
                 "duplicate_work": sum(1 for ep in episodes if ep.duplicate_signals),
@@ -1463,6 +1483,7 @@ def build_report(
                 "Markdown 主报告只展示聚合问题和代表证据。",
                 "完整 episode、missed_use、评分和 heuristic 明细保留在本 debug_artifact 中。",
                 "缺少 result/close/consumption 的场景默认按可观测性缺口处理，不直接归因为真实无效。",
+                "current_task_tree 使用 task_complete 判断当前终态；close_agent 只作为 legacy episode 证据。",
             ],
         },
         "root_causes": root_causes_from_issues(issue_groups),

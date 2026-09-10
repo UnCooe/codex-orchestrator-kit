@@ -18,6 +18,10 @@ from session_facts import (
     scan_observability_event_files,
     scan_session_files,
 )
+from task_tree import analyze_session_tree
+
+
+MAX_EMBEDDED_FACTS = 2000
 
 
 def parse_args():
@@ -146,7 +150,7 @@ def _build_suggestions(
     if acceptance.get("footer_subagent_fail", 0) > 0:
         suggestions.append("Subagent lifecycle text and subagent_status disagree in the acceptance footer.")
     if subagents.get("lifecycle_delta_spawn_minus_close", 0) > 0:
-        suggestions.append("Spawned subagents exceed closes; check for missing close messages.")
+        suggestions.append("Legacy close_agent-derived spawn/close delta is positive; use task_tree.open_children for current terminal state.")
     if noise.get("large_tool_outputs", 0) > 0:
         suggestions.append("Reduce large tool outputs by enabling summaries or truncation.")
     if event_breakdown.get("transcript_message_assistant", 0) > 0 and sessions_seen == 0:
@@ -408,8 +412,10 @@ def build_report(
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=since_days)
 
-    event_files = list(scan_session_files(codex_home, cutoff=cutoff)) + list(scan_observability_event_files(codex_home))
+    session_files = list(scan_session_files(codex_home, cutoff=cutoff))
+    event_files = session_files + list(scan_observability_event_files(codex_home))
     facts, fact_stats = extract_facts(event_files, codex_home, cutoff)
+    task_tree_summary = analyze_session_tree(session_files)
 
     totals = defaultdict(int, fact_stats)
     event_breakdown: Dict[str, Dict[str, int]] = defaultdict(lambda: {"total": 0, "blocked": 0, "allowed": 0})
@@ -522,12 +528,14 @@ def build_report(
         if event_type == "transcript_token_count":
             totals["token_count_events"] += 1
             token_count = int(row_dict.get("token_count", 0) or 0)
+            token_usage = row_dict.get("token_usage") if isinstance(row_dict.get("token_usage"), dict) else {}
             if token_count > totals.get("token_count_max", 0):
                 totals["token_count_max"] = token_count
             if len(token_snapshots) < max_samples:
                 token_snapshots.append(
                     {
                         "token_count": row_dict.get("token_count"),
+                        "token_usage": token_usage,
                         "file": row_dict["source_file"],
                         "line": row_dict["source_line"],
                     }
@@ -592,12 +600,14 @@ def build_report(
 
     reports_root = Path(reports_dir) if reports_dir else (codex_home / "orchestrator-observability" / "reports")
     reports_root.mkdir(parents=True, exist_ok=True)
+    report_facts = facts[-MAX_EMBEDDED_FACTS:]
     facts_for_report = []
-    for fact in facts:
+    for fact in report_facts:
         row = fact_to_dict(fact)
         row["cwd"] = _cwd_label(str(row.get("cwd") or "unknown"), include_paths)
         facts_for_report.append(row)
 
+    token_usage_totals = dict(task_tree_summary.get("aggregate", {}).get("token_usage", {}))
     data = {
         "generated_at": now.isoformat().replace("+00:00", "Z"),
         "report_name": f"orchestrator-observability-{report_id}.json",
@@ -605,6 +615,12 @@ def build_report(
         "since_days": since_days,
         "paths_included": include_paths,
         "fact_count": len(facts),
+        "fact_output": {
+            "limit": MAX_EMBEDDED_FACTS,
+            "emitted": len(report_facts),
+            "omitted": max(0, len(facts) - len(report_facts)),
+            "truncated": len(facts) > len(report_facts),
+        },
         "window": {
             "from": cutoff.isoformat().replace("+00:00", "Z"),
             "to": now.isoformat().replace("+00:00", "Z"),
@@ -617,6 +633,7 @@ def build_report(
         "orchestrator_event_breakdown": {k: v for k, v in event_breakdown.items()},
         "transcript_breakdown": dict(transcript_breakdown),
         "subagents": dict(subagents),
+        "task_tree": task_tree_summary,
         "tool_calls": dict(tool_calls),
         "tool_surface": {
             "families": dict(tool_surface["families"]),
@@ -636,6 +653,7 @@ def build_report(
             isinstance(item, dict) and bool(item.get("available")) for item in project_context.values()
         ),
         "token_snapshots": token_snapshots,
+        "token_usage_totals": token_usage_totals,
         "samples": samples,
         "facts": facts_for_report,
     }
@@ -682,7 +700,10 @@ def build_report(
         f"- Sessions seen: {len(sessions)}",
         f"- Projects seen: {len(projects)}",
         f"- Subagent spawn/wait/close: {subagents.get('spawn_agent', 0)}/{subagents.get('wait_agent', 0)}/{subagents.get('close_agent', 0)}",
-        f"- Subagent lifecycle delta: {subagents.get('lifecycle_delta_spawn_minus_close', 0)}",
+        f"- Subagent lifecycle delta (legacy close_agent-derived): {subagents.get('lifecycle_delta_spawn_minus_close', 0)}",
+        f"- Task-tree current open/completed children: {task_tree_summary['aggregate'].get('open_children', 0)}/{task_tree_summary['aggregate'].get('completed_children', 0)}",
+        f"- Task-tree peak active children: {task_tree_summary['aggregate'].get('peak_active_children', 0)}",
+        f"- Token usage total/cached/reasoning: {token_usage_totals.get('total_tokens', 0)}/{token_usage_totals.get('cached_input_tokens', 0)}/{token_usage_totals.get('reasoning_output_tokens', 0)}",
         f"- Large tool outputs: {noise.get('large_tool_outputs', 0)}",
         f"- Acceptance footer complete: {acceptance.get('acceptance_footer_complete', 0)}",
         f"- Acceptance footer missing on work-done replies: {acceptance.get('work_done_missing_acceptance_footer', 0)}",
@@ -780,6 +801,8 @@ def build_report(
     return {
         "json_report": str(json_path),
         "markdown_report": str(md_path),
+        "fact_count": len(facts),
+        "fact_output": data["fact_output"],
         "totals": dict(totals),
         "orchestrator_event_breakdown": {k: v for k, v in event_breakdown.items()},
         "subagents": dict(subagents),

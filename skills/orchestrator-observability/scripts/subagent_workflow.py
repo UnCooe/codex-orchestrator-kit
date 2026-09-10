@@ -18,6 +18,10 @@ from session_facts import (
     scan_observability_event_files,
     scan_session_files,
 )
+from task_tree import analyze_session_tree
+
+
+MAX_EMBEDDED_FACTS = 2000
 
 MIN_SAMPLE_SESSIONS = 5
 MIN_SAMPLE_WORK_DONE = 1
@@ -412,8 +416,10 @@ def build_report(
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=since_days)
 
-    event_files = list(scan_session_files(codex_home, cutoff=cutoff)) + list(scan_observability_event_files(codex_home))
+    session_files = list(scan_session_files(codex_home, cutoff=cutoff))
+    event_files = session_files + list(scan_observability_event_files(codex_home))
     facts, fact_stats = extract_facts(event_files, codex_home, cutoff)
+    task_tree_summary = analyze_session_tree(session_files)
 
     totals = defaultdict(int, fact_stats)
     event_breakdown = Counter()
@@ -553,24 +559,41 @@ def build_report(
     spawn_count = subagents.get("spawn_agent", 0)
     wait_count = subagents.get("wait_agent", 0)
     close_count = subagents.get("close_agent", 0)
+    followup_count = subagents.get("followup_task", 0)
+    send_count = subagents.get("send_message", 0)
     unclosed_delta = spawn_count - close_count
+    current_open_children = int(task_tree_summary.get("aggregate", {}).get("open_children", 0) or 0)
+    current_completed_children = int(task_tree_summary.get("aggregate", {}).get("completed_children", 0) or 0)
+    current_peak_active = int(task_tree_summary.get("aggregate", {}).get("peak_active_children", 0) or 0)
     total_tool_calls = max(1, tool_calls.total())
     delegation_rate = _safe_divide(spawn_count, total_tool_calls)
     legacy_spawn_per_heavy_signal = _safe_divide(spawn_count, max(1, heavy_work_delegation_signals))
 
-    open_session_count = 0
-    unexplained_open_session_count = 0
-    unresolved_lifecycle_delta = 0
+    legacy_open_session_count = 0
+    legacy_unexplained_open_session_count = 0
+    legacy_unresolved_lifecycle_delta = 0
     explained_retained_sessions = 0
     for session_id, stats in per_session_subagents.items():
         delta = stats["spawn_agent"] - stats["close_agent"]
         if delta > 0:
-            open_session_count += 1
+            legacy_open_session_count += 1
             if per_session_retained_explanations.get(session_id, 0) > 0:
                 explained_retained_sessions += 1
             else:
-                unexplained_open_session_count += 1
-                unresolved_lifecycle_delta += delta
+                legacy_unexplained_open_session_count += 1
+                legacy_unresolved_lifecycle_delta += delta
+    task_tree_aggregate = task_tree_summary.get("aggregate", {})
+    task_tree_has_children = int(task_tree_aggregate.get("sessions", 0) or 0) > int(
+        task_tree_aggregate.get("roots", 0) or 0
+    )
+    if task_tree_has_children:
+        open_session_count = current_open_children
+        unexplained_open_session_count = current_open_children
+        unresolved_lifecycle_delta = current_open_children
+    else:
+        open_session_count = legacy_open_session_count
+        unexplained_open_session_count = legacy_unexplained_open_session_count
+        unresolved_lifecycle_delta = legacy_unresolved_lifecycle_delta
 
     heavy_signal_sessions = 0
     heavy_signal_sessions_with_spawn = 0
@@ -616,8 +639,9 @@ def build_report(
         isinstance(item, dict) and bool(item.get("available")) for item in project_context.values()
     )
 
+    report_facts = facts[-MAX_EMBEDDED_FACTS:]
     facts_for_report = []
-    for fact in facts:
+    for fact in report_facts:
         row = fact_to_dict(fact)
         row["cwd"] = _cwd_label(str(row.get("cwd") or "unknown"), include_paths)
         facts_for_report.append(row)
@@ -636,6 +660,12 @@ def build_report(
         "acceptance_policy": acceptance_policy,
         "project_context_available": project_context_available,
         "fact_count": len(facts),
+        "fact_output": {
+            "limit": MAX_EMBEDDED_FACTS,
+            "emitted": len(report_facts),
+            "omitted": max(0, len(facts) - len(report_facts)),
+            "truncated": len(facts) > len(report_facts),
+        },
         "totals": dict(totals),
         "window": {
             "from": cutoff.isoformat().replace("+00:00", "Z"),
@@ -649,12 +679,25 @@ def build_report(
             "spawn": spawn_count,
             "wait": wait_count,
             "close": close_count,
+            "followup": followup_count,
+            "send_message": send_count,
             "unclosed_delta": unclosed_delta,
             "open_sessions": open_session_count,
             "unexplained_open_sessions": unexplained_open_session_count,
             "explained_retained_sessions": explained_retained_sessions,
             "lifecycle_delta_spawn_minus_close": unclosed_delta,
             "unresolved_lifecycle_delta": unresolved_lifecycle_delta,
+            "legacy_close_agent_derived": {
+                "unclosed_delta": unclosed_delta,
+                "open_sessions": legacy_open_session_count,
+                "unexplained_open_sessions": legacy_unexplained_open_session_count,
+                "unresolved_lifecycle_delta": legacy_unresolved_lifecycle_delta,
+            },
+            "current_task_tree": {
+                "open_children": current_open_children,
+                "completed_children": current_completed_children,
+                "peak_active_children": current_peak_active,
+            },
             "spawn_per_tool_call": delegation_rate,
             "spawn_per_heavy_signal": avg_spawns_per_signal_session,
             "spawn_per_heavy_signal_legacy": legacy_spawn_per_heavy_signal,
@@ -681,6 +724,7 @@ def build_report(
                 "interpretation": heavy_signal_interpretation,
             },
         },
+        "task_tree": task_tree_summary,
         "closure_signals": {
             "lifecycle_delta": unclosed_delta,
             "unresolved_lifecycle_delta": unresolved_lifecycle_delta,
@@ -748,10 +792,12 @@ def build_report(
         f"- Sample status: {sample_assessment['status']} ({', '.join(sample_assessment['reasons']) or 'none'})",
         "",
         "## Workflow health",
-        f"- Spawn/Wait/Close: {spawn_count}/{wait_count}/{close_count}",
-        f"- Unclosed delta: {unclosed_delta}",
+        f"- Spawn/Wait/Close/Followup/Send: {spawn_count}/{wait_count}/{close_count}/{followup_count}/{send_count}",
+        f"- Unclosed delta (legacy close_agent-derived): {unclosed_delta}",
         f"- Unresolved lifecycle delta: {unresolved_lifecycle_delta}",
         f"- Open sessions with unclosed subagents: {open_session_count}",
+        f"- Current task-tree completed children: {current_completed_children}",
+        f"- Current task-tree peak active children: {current_peak_active}",
         f"- Explained retained sessions: {explained_retained_sessions}",
         f"- Unexplained open sessions: {unexplained_open_session_count}",
         f"- Lifecycle integrity issues: {lifecycle_integrity_issues}",
@@ -817,6 +863,8 @@ def build_report(
     return {
         "json_report": str(json_path),
         "markdown_report": str(md_path),
+        "fact_count": len(facts),
+        "fact_output": data["fact_output"],
         "totals": dict(totals),
         "subagents": data["subagents"],
         "workflow_signals": data["workflow_signals"],

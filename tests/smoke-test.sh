@@ -7,21 +7,118 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 CODEX_HOME="$TMP_ROOT/.codex"
 AGENTS_HOME="$TMP_ROOT/.agents"
-FIXTURE_SINCE_DAYS=3650
+FIXTURE_SINCE_DAYS=36500
 export CODEX_HOME AGENTS_HOME
 mkdir -p "$CODEX_HOME" "$AGENTS_HOME"
 cp "$ROOT/tests/fixtures/hooks.before.json" "$CODEX_HOME/hooks.json"
 mkdir -p "$CODEX_HOME/agents"
 printf '%s\n' 'name = "codebase_research_explorer"' > "$CODEX_HOME/agents/codebase-research-explorer.toml"
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN=python3
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN=python
-else
-  echo "python3 or python is required" >&2
+mkdir -p "$AGENTS_HOME/skills/orchestrator"
+printf '%s\n' 'stale' > "$AGENTS_HOME/skills/orchestrator/stale-managed-file.txt"
+PYTHON_BIN=""
+for candidate in python3.13 python3.12 python3.11 python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+  then
+    PYTHON_BIN="$candidate"
+    break
+  fi
+done
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "Python >= 3.11 is required; checked python3.13, python3.12, python3.11, python3" >&2
   exit 1
 fi
 PYTHON_REAL=$(command -v "$PYTHON_BIN")
+VERIFY_SKILL_INSTALL="$ROOT/scripts/verify_skill_install.py"
+MANAGED_SKILLS=(
+  orchestrator
+  orchestrator-observability
+  feature-workflow
+  review-workflow
+  merge-workflow
+  predeploy-workflow
+  merge-safety
+)
+
+assert_managed_skills_only() {
+  local skills_root=$1
+  for skill in "${MANAGED_SKILLS[@]}"; do
+    test -f "$skills_root/$skill/SKILL.md"
+  done
+  "$PYTHON_BIN" - "$skills_root" "${MANAGED_SKILLS[@]}" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+expected = set(sys.argv[2:])
+actual = {path.name for path in root.iterdir() if path.is_dir()}
+if actual != expected:
+    raise SystemExit(f"managed skill catalog mismatch: {sorted(actual)}")
+PY
+}
+
+assert_skill_parity() {
+  local target_root=$1
+  "$PYTHON_BIN" "$VERIFY_SKILL_INSTALL" --source "$ROOT/skills" --target "$target_root"
+}
+
+assert_router_v3_hook_runtime() {
+  local hooks_root=$1
+  "$PYTHON_BIN" - "$hooks_root" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+actual = {path.name for path in root.iterdir() if path.is_file()}
+expected = {"critical_action_gate.py"}
+if actual != expected:
+    raise SystemExit(f"Router v3 hook runtime mismatch: {sorted(actual)}")
+PY
+}
+
+assert_router_v3_hooks_json() {
+  local hooks_path=$1
+  "$PYTHON_BIN" - "$hooks_path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    obj = json.load(stream)
+
+gate_entries = []
+commands = []
+for event, entries in obj.get("hooks", {}).items():
+    for entry in entries:
+        matcher = entry.get("matcher", "")
+        for hook in entry.get("hooks", []):
+            command = str(hook.get("command", ""))
+            commands.append(command)
+            if "critical_action_gate.py" in command:
+                gate_entries.append((event, matcher, command))
+
+if len(gate_entries) != 1 or gate_entries[0][:2] != ("PreToolUse", "^(Bash|exec_command)$"):
+    raise SystemExit(f"expected one command PreTool critical gate, got: {gate_entries}")
+if any("pilot_receipt_gate.py" in command for command in commands):
+    raise SystemExit("retired pilot gate must not be registered")
+if any(matcher == "*" for _event, matcher, _command in gate_entries):
+    raise SystemExit(f"managed hooks must not use wildcard matcher: {gate_entries}")
+if any(matcher == "^apply_patch$" for _event, matcher, _command in gate_entries):
+    raise SystemExit(f"critical gate must not be registered on apply_patch: {gate_entries}")
+for legacy in (
+    "orchestrator_user_prompt.py",
+    "orchestrator_pre_tool_use.py",
+    "orchestrator_post_tool_use.py",
+    "orchestrator_stop.py",
+):
+    if any(legacy in command for command in commands):
+        raise SystemExit(f"legacy managed hook still registered: {legacy}")
+for project_hook in ("pre-existing-user-prompt.py", "pre-existing-pre-tool.py"):
+    if not any(project_hook in command for command in commands):
+        raise SystemExit(f"project hook was not preserved: {project_hook}")
+PY
+}
 
 DEFAULT_DRY_CODEX="$TMP_ROOT/default-dry-codex"
 DEFAULT_DRY_AGENTS="$TMP_ROOT/default-dry-agents"
@@ -37,21 +134,95 @@ fi
 
 "$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" --apply --hook-mode auto --skills-mode auto >/dev/null
 
-test -f "$AGENTS_HOME/skills/orchestrator/SKILL.md"
-test -f "$AGENTS_HOME/skills/orchestrator-observability/SKILL.md"
+assert_managed_skills_only "$AGENTS_HOME/skills"
+assert_skill_parity "$AGENTS_HOME/skills"
+test ! -e "$AGENTS_HOME/skills/orchestrator/stale-managed-file.txt"
+compgen -G "$AGENTS_HOME/skills/orchestrator/stale-managed-file.txt.bak.*" >/dev/null
 if [[ -e "$AGENTS_HOME/skills/project-specific-observability/SKILL.md" ]]; then
   echo "Default install should not install project-specific reviewer packs" >&2
   exit 1
 fi
-test -f "$CODEX_HOME/hooks/orchestrator_user_prompt.py"
+assert_router_v3_hook_runtime "$CODEX_HOME/hooks"
+assert_router_v3_hooks_json "$CODEX_HOME/hooks.json"
 test -f "$CODEX_HOME/agents/critic.toml"
 if [[ -e "$CODEX_HOME/agents/codebase-research-explorer.toml" ]]; then
   echo "Deprecated codebase-research-explorer agent should be removed during install" >&2
   exit 1
 fi
 
+BAD_SKILLS="$TMP_ROOT/bad-skills"
+cp -R "$AGENTS_HOME/skills" "$BAD_SKILLS"
+mkdir -p "$BAD_SKILLS/orchestrator/__pycache__" "$BAD_SKILLS/orchestrator/.bak.20260722"
+printf '%s\n' 'ignored' > "$BAD_SKILLS/orchestrator/__pycache__/ignored.pyc"
+printf '%s\n' 'ignored' > "$BAD_SKILLS/orchestrator/.bak.20260722/SKILL.md"
+assert_skill_parity "$BAD_SKILLS"
+printf '%s\n' '# tampered' >> "$BAD_SKILLS/orchestrator/SKILL.md"
+if assert_skill_parity "$BAD_SKILLS" >/dev/null 2>&1; then
+  echo "verify_skill_install.py should fail on SHA-256 mismatch" >&2
+  exit 1
+fi
+
+SKILLS_ONLY_CODEX="$TMP_ROOT/skills-only-codex"
+SKILLS_ONLY_AGENTS="$TMP_ROOT/skills-only-agents"
+mkdir -p "$SKILLS_ONLY_CODEX/agents"
+printf '%s\n' '{"hooks":{"UserPromptSubmit":[]}}' > "$SKILLS_ONLY_CODEX/hooks.json"
+printf '%s\n' 'sentinel = true' > "$SKILLS_ONLY_CODEX/config.toml"
+printf '%s\n' 'name = "keep_me"' > "$SKILLS_ONLY_CODEX/agents/keep-me.toml"
+mkdir -p "$SKILLS_ONLY_CODEX/hooks"
+printf '%s\n' 'keep' > "$SKILLS_ONLY_CODEX/hooks/keep-me.py"
+HOOKS_BEFORE=$(cat "$SKILLS_ONLY_CODEX/hooks.json")
+CONFIG_BEFORE=$(cat "$SKILLS_ONLY_CODEX/config.toml")
+"$ROOT/install.sh" --codex-home "$SKILLS_ONLY_CODEX" --agents-home "$SKILLS_ONLY_AGENTS" --apply --skills-only --skills-mode agents >/dev/null
+assert_managed_skills_only "$SKILLS_ONLY_AGENTS/skills"
+assert_skill_parity "$SKILLS_ONLY_AGENTS/skills"
+if [[ "$(cat "$SKILLS_ONLY_CODEX/hooks.json")" != "$HOOKS_BEFORE" ]]; then
+  echo "Skills-only install mutated hooks.json" >&2
+  exit 1
+fi
+test -f "$SKILLS_ONLY_CODEX/agents/keep-me.toml"
+test -f "$SKILLS_ONLY_CODEX/hooks/keep-me.py"
+if [[ "$(cat "$SKILLS_ONLY_CODEX/config.toml")" != "$CONFIG_BEFORE" ]]; then
+  echo "Skills-only install mutated config.toml" >&2
+  exit 1
+fi
+"$ROOT/uninstall.sh" --codex-home "$SKILLS_ONLY_CODEX" --agents-home "$SKILLS_ONLY_AGENTS" --skills-only --skills-mode agents >/dev/null
+if [[ -e "$SKILLS_ONLY_AGENTS/skills/orchestrator/SKILL.md" ]]; then
+  echo "Skills-only uninstall did not remove installed skills" >&2
+  exit 1
+fi
+if [[ "$(cat "$SKILLS_ONLY_CODEX/hooks.json")" != "$HOOKS_BEFORE" ]]; then
+  echo "Skills-only uninstall mutated hooks.json" >&2
+  exit 1
+fi
+test -f "$SKILLS_ONLY_CODEX/agents/keep-me.toml"
+test -f "$SKILLS_ONLY_CODEX/hooks/keep-me.py"
+test "$(cat "$SKILLS_ONLY_CODEX/config.toml")" = "$CONFIG_BEFORE"
+
+SKILLS_ONLY_CODEX_MODE="$TMP_ROOT/skills-only-codex-mode"
+SKILLS_ONLY_CODEX_MODE_AGENTS="$TMP_ROOT/skills-only-codex-mode-agents"
+mkdir -p "$SKILLS_ONLY_CODEX_MODE/skills/orchestrator" "$SKILLS_ONLY_CODEX_MODE/agents" "$SKILLS_ONLY_CODEX_MODE/hooks"
+printf '%s\n' 'stale' > "$SKILLS_ONLY_CODEX_MODE/skills/orchestrator/stale-managed-file.txt"
+printf '%s\n' '{"hooks":{"UserPromptSubmit":[]}}' > "$SKILLS_ONLY_CODEX_MODE/hooks.json"
+printf '%s\n' 'sentinel = true' > "$SKILLS_ONLY_CODEX_MODE/config.toml"
+printf '%s\n' 'keep' > "$SKILLS_ONLY_CODEX_MODE/agents/keep-me.toml"
+printf '%s\n' 'keep' > "$SKILLS_ONLY_CODEX_MODE/hooks/keep-me.py"
+"$ROOT/install.sh" --codex-home "$SKILLS_ONLY_CODEX_MODE" --agents-home "$SKILLS_ONLY_CODEX_MODE_AGENTS" --apply --skills-only --skills-mode codex >/dev/null
+assert_managed_skills_only "$SKILLS_ONLY_CODEX_MODE/skills"
+assert_skill_parity "$SKILLS_ONLY_CODEX_MODE/skills"
+test ! -e "$SKILLS_ONLY_CODEX_MODE/skills/orchestrator/stale-managed-file.txt"
+compgen -G "$SKILLS_ONLY_CODEX_MODE/skills/orchestrator/stale-managed-file.txt.bak.*" >/dev/null
+test -f "$SKILLS_ONLY_CODEX_MODE/agents/keep-me.toml"
+test -f "$SKILLS_ONLY_CODEX_MODE/hooks/keep-me.py"
+grep -q 'sentinel = true' "$SKILLS_ONLY_CODEX_MODE/config.toml"
+"$ROOT/uninstall.sh" --codex-home "$SKILLS_ONLY_CODEX_MODE" --agents-home "$SKILLS_ONLY_CODEX_MODE_AGENTS" --skills-only --skills-mode codex >/dev/null
+test ! -e "$SKILLS_ONLY_CODEX_MODE/skills/orchestrator/SKILL.md"
+test -f "$SKILLS_ONLY_CODEX_MODE/agents/keep-me.toml"
+test -f "$SKILLS_ONLY_CODEX_MODE/hooks/keep-me.py"
+grep -q 'sentinel = true' "$SKILLS_ONLY_CODEX_MODE/config.toml"
+
 CONFIG_CODEX="$TMP_ROOT/config-codex"
-mkdir -p "$CONFIG_CODEX/skills"
+mkdir -p "$CONFIG_CODEX/skills/orchestrator"
+printf '%s\n' 'stale' > "$CONFIG_CODEX/skills/orchestrator/stale-managed-file.txt"
 cat > "$CONFIG_CODEX/config.toml" <<'EOF'
 approval_policy = 'never'
 
@@ -59,9 +230,11 @@ approval_policy = 'never'
 codex_hooks = true
 EOF
 "$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex --apply >/dev/null
-test -f "$CONFIG_CODEX/skills/orchestrator/SKILL.md"
-test -f "$CONFIG_CODEX/skills/orchestrator-observability/SKILL.md"
-test -f "$CONFIG_CODEX/hooks/orchestrator_user_prompt.py"
+assert_managed_skills_only "$CONFIG_CODEX/skills"
+assert_skill_parity "$CONFIG_CODEX/skills"
+test ! -e "$CONFIG_CODEX/skills/orchestrator/stale-managed-file.txt"
+compgen -G "$CONFIG_CODEX/skills/orchestrator/stale-managed-file.txt.bak.*" >/dev/null
+assert_router_v3_hook_runtime "$CONFIG_CODEX/hooks"
 "$PYTHON_BIN" - "$CONFIG_CODEX/config.toml" <<'PY'
 import tomllib
 import sys
@@ -69,9 +242,21 @@ import sys
 with open(sys.argv[1], "rb") as stream:
     obj = tomllib.load(stream)
 hooks = obj.get("hooks", {})
-for required in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
-    if required not in hooks:
-        raise SystemExit(f"config.toml mode missing hook: {required}")
+if set(hooks) != {"PreToolUse"}:
+    raise SystemExit(f"config.toml mode should install only PreToolUse: {sorted(hooks)}")
+entries = hooks["PreToolUse"]
+by_matcher = {
+    entry.get("matcher"): [
+        hook["command"]
+        for hook in entry.get("hooks", [])
+    ]
+    for entry in entries
+}
+if set(by_matcher) != {"^(Bash|exec_command)$"}:
+    raise SystemExit(f"config.toml mode missing narrow command matcher: {entries}")
+commands = by_matcher["^(Bash|exec_command)$"]
+if len(commands) != 1 or "critical_action_gate.py" not in commands[0]:
+    raise SystemExit(f"config.toml mode missing single critical gate: {by_matcher}")
 PY
 "$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex --apply >/dev/null
 "$PYTHON_BIN" - "$CONFIG_CODEX/config.toml" <<'PY'
@@ -82,10 +267,23 @@ import sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 obj = tomllib.loads(text)
-for required in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
-    entries = obj["hooks"].get(required, [])
-    if len(entries) != 1:
-        raise SystemExit(f"config.toml install is not idempotent for {required}: {len(entries)} entries")
+entries = obj["hooks"].get("PreToolUse", [])
+gate_commands = [
+    hook["command"]
+    for entry in entries
+    for hook in entry.get("hooks", [])
+    if "critical_action_gate.py" in hook.get("command", "")
+]
+if len(gate_commands) != 1:
+    raise SystemExit(f"config.toml install is not idempotent for critical gate: {gate_commands}")
+pilot_commands = [
+    hook["command"]
+    for entry in entries
+    for hook in entry.get("hooks", [])
+    if "pilot_receipt_gate.py" in hook.get("command", "")
+]
+if pilot_commands:
+    raise SystemExit(f"retired pilot gate remains registered: {pilot_commands}")
 PY
 
 EXISTING_HOOKS_CODEX="$TMP_ROOT/config-codex-existing-hooks"
@@ -129,11 +327,17 @@ if len(user_prompt_entries) != 1:
 commands = [hook["command"] for hook in user_prompt_entries[0]["hooks"]]
 if not any("aiserver_session_context.py" in command for command in commands):
     raise SystemExit("missing existing aiserver hook after config merge")
-if not any("orchestrator_user_prompt.py" in command for command in commands):
-    raise SystemExit("missing orchestrator user prompt hook after config merge")
-for required in ("PreToolUse", "PostToolUse", "Stop"):
-    if required not in obj["hooks"]:
-        raise SystemExit(f"missing {required} after config merge")
+pretool_entries = obj["hooks"].get("PreToolUse", [])
+gate_entries = [
+    entry
+    for entry in pretool_entries
+    if any("critical_action_gate.py" in hook.get("command", "") for hook in entry.get("hooks", []))
+]
+if len(gate_entries) != 1 or gate_entries[0].get("matcher") != "^(Bash|exec_command)$":
+    raise SystemExit(f"missing single command critical gate after config merge: {gate_entries}")
+for forbidden in ("PostToolUse", "Stop"):
+    if forbidden in obj["hooks"]:
+        raise SystemExit(f"unexpected legacy managed event after config merge: {forbidden}")
 PY
 
 if "$PYTHON_BIN" - "$ROOT/templates/review-profile.toml" <<'PY'
@@ -194,14 +398,19 @@ grep -q 'legacy.*orchestrator_pre_tool_use\.py' "$CODEX_HOME/hooks.json" && {
 
 grep -q 'pre-existing-user-prompt.py' "$CODEX_HOME/hooks.json"
 grep -q 'pre-existing-pre-tool.py' "$CODEX_HOME/hooks.json"
-grep -q 'orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json"
-
-"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" --apply --hook-mode auto --skills-mode auto >/dev/null
-COUNT=$(grep -o 'orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json" | wc -l | tr -d ' ')
-if [[ "$COUNT" != "1" ]]; then
-  echo "Install is not idempotent: orchestrator_user_prompt.py appears $COUNT times" >&2
+grep -q 'critical_action_gate.py' "$CODEX_HOME/hooks.json"
+if grep -q 'pilot_receipt_gate.py' "$CODEX_HOME/hooks.json"; then
+  echo "Retired pilot gate should not be installed" >&2
   exit 1
 fi
+
+"$ROOT/install.sh" --codex-home "$CODEX_HOME" --agents-home "$AGENTS_HOME" --apply --hook-mode auto --skills-mode auto >/dev/null
+COUNT=$(grep -o 'critical_action_gate.py' "$CODEX_HOME/hooks.json" | wc -l | tr -d ' ')
+if [[ "$COUNT" != "1" ]]; then
+  echo "Install is not idempotent: critical_action_gate.py appears $COUNT times" >&2
+  exit 1
+fi
+assert_router_v3_hooks_json "$CODEX_HOME/hooks.json"
 
 DRY_CODEX="$TMP_ROOT/dry-codex"
 DRY_AGENTS="$TMP_ROOT/dry-agents"
@@ -211,105 +420,26 @@ if [[ -e "$DRY_CODEX" || -e "$DRY_AGENTS" ]]; then
   exit 1
 fi
 
-PRE_TOOL="$CODEX_HOME/hooks/orchestrator_pre_tool_use.py"
-POST_TOOL="$CODEX_HOME/hooks/orchestrator_post_tool_use.py"
-STOP_HOOK="$CODEX_HOME/hooks/orchestrator_stop.py"
+CRITICAL_GATE="$CODEX_HOME/hooks/critical_action_gate.py"
 SESSIONS_ROOT="$CODEX_HOME/sessions"
 mkdir -p "$SESSIONS_ROOT"
 
-TRANSCRIPT_FOR_HOOKS="$SESSIONS_ROOT/hook-events.jsonl"
-HOOK_PROJECT="$CODEX_HOME/hook-project"
-mkdir -p "$HOOK_PROJECT/.codex"
-cat > "$HOOK_PROJECT/.codex/review-profile.toml" <<'TOML'
-[workflow_profile]
-pretool_policy = "hard"
-TOML
-SHELL_COMMAND_BLOCK=$(printf '%s' "{\"cwd\":\"$HOOK_PROJECT\",\"tool_name\":\"shell_command\",\"tool_input\":{\"command\":\"find .\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
-"$PYTHON_BIN" - "$SHELL_COMMAND_BLOCK" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block":
-    raise SystemExit("shell_command broad scan was not blocked")
-PY
-
-POWERSHELL_BLOCK=$(printf '%s' "{\"cwd\":\"$HOOK_PROJECT\",\"tool_name\":\"powershell\",\"tool_input\":{\"command\":\"Get-ChildItem -Recurse\"},\"transcript_path\":\"$TRANSCRIPT_FOR_HOOKS\"}" | "$PYTHON_BIN" "$PRE_TOOL")
-"$PYTHON_BIN" - "$POWERSHELL_BLOCK" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block":
-    raise SystemExit("PowerShell broad scan was not blocked")
-PY
-
-POST_SHELL_BLOCK=$("$PYTHON_BIN" -c "import json; print(json.dumps({'tool_name':'shell_command','tool_response':'x'*60001,'transcript_path':'$TRANSCRIPT_FOR_HOOKS'}))" | "$PYTHON_BIN" "$POST_TOOL")
-"$PYTHON_BIN" - "$POST_SHELL_BLOCK" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block" or obj.get("continue") is not False:
-    raise SystemExit("Large shell_command output was not blocked")
-PY
-
-POST_NON_SHELL=$("$PYTHON_BIN" -c "import json; print(json.dumps({'tool_name':'python','tool_response':'x'*60001,'transcript_path':'$TRANSCRIPT_FOR_HOOKS'}))" | "$PYTHON_BIN" "$POST_TOOL")
-if [[ -n "$POST_NON_SHELL" ]]; then
-  echo "Large non-shell output should not block" >&2
+ORDINARY_GATE=$(printf '%s' '{"tool_name":"Bash","tool_input":{"cmd":"python -V"}}' | "$PYTHON_BIN" "$CRITICAL_GATE")
+if [[ -n "$ORDINARY_GATE" ]]; then
+  echo "Ordinary Bash fast path should stay silent" >&2
   exit 1
 fi
 
-STRUCTURED_STOP=$(cat <<JSON | "$PYTHON_BIN" "$STOP_HOOK"
-{"transcript_path":"$TRANSCRIPT_FOR_HOOKS","last_assistant_message":"implemented hook behavior.\nverification_status=pass\nreview_status=not_required\nsubagent_status=closed\nrisk_status=low"}
-JSON
-)
-"$PYTHON_BIN" - "$STRUCTURED_STOP" <<'PY'
+DANGEROUS_GATE=$(printf '%s' '{"tool_name":"Bash","tool_input":{"cmd":"git push origin HEAD:pre"}}' | "$PYTHON_BIN" "$CRITICAL_GATE")
+"$PYTHON_BIN" - "$DANGEROUS_GATE" <<'PY'
 import json
 import sys
 
 obj = json.loads(sys.argv[1])
-if obj.get("continue") is not True:
-    raise SystemExit("Structured acceptance stop payload did not pass")
-PY
-
-PARTIAL_VERIFICATION_STOP=$(cat <<'JSON' | "$PYTHON_BIN" "$STOP_HOOK"
-{"last_assistant_message":"implemented hook behavior.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=medium；live client validation remains."}
-JSON
-)
-"$PYTHON_BIN" - "$PARTIAL_VERIFICATION_STOP" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-if obj.get("continue") is not True:
-    raise SystemExit("Explained partial verification should pass with non-low risk")
-PY
-
-LOW_RISK_PARTIAL_STOP=$(cat <<'JSON' | "$PYTHON_BIN" "$STOP_HOOK"
-{"last_assistant_message":"implemented hook behavior.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}
-JSON
-)
-"$PYTHON_BIN" - "$LOW_RISK_PARTIAL_STOP" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-if obj.get("decision") != "block" or obj.get("suppressOutput") is not True or obj.get("reason") != "Verification claim conflicts with the summary.":
-    raise SystemExit("Stop gate should block low-risk partial verification while suppressing UI output")
-PY
-
-PARTIAL_STOP=$(cat <<'JSON' | "$PYTHON_BIN" "$STOP_HOOK"
-{"last_assistant_message":"implemented hook behavior.\nverification_status=pass\nreview_status=pass"}
-JSON
-)
-"$PYTHON_BIN" - "$PARTIAL_STOP" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-if obj.get("continue") is not True:
-    raise SystemExit("Partial acceptance formatting should not be blocked")
+hook_output = obj.get("hookSpecificOutput", {})
+reason = str(hook_output.get("permissionDecisionReason", "")).lower()
+if hook_output.get("permissionDecision") != "deny" or "current-turn" not in reason:
+    raise SystemExit(f"unauthorized push candidate was not blocked: {obj}")
 PY
 
 SPACE_PY_DIR="$TMP_ROOT/python with space"
@@ -329,7 +459,16 @@ import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     hooks = json.load(stream)
-command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+entries = hooks["hooks"]["PreToolUse"]
+commands = [
+    hook["command"]
+    for entry in entries
+    for hook in entry.get("hooks", [])
+    if "critical_action_gate.py" in hook.get("command", "")
+]
+if len(commands) != 1:
+    raise SystemExit(f"Python override install missing single critical gate: {commands}")
+command = commands[0]
 expected = f'"{sys.argv[2]}" '
 if not command.startswith(expected):
     raise SystemExit(f"Python override with spaces was not quoted: {command}")
@@ -337,6 +476,11 @@ PY
 
 mkdir -p "$SESSIONS_ROOT"
 cp "$ROOT/tests/fixtures/session-observability.jsonl" "$SESSIONS_ROOT/session-smoke.jsonl"
+FIXTURE_TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+cat >> "$SESSIONS_ROOT/session-smoke.jsonl" <<JSONL
+{"event":"orchestrator_observability","event_name":"pre_tool_use","status":"blocked","created_at":"$FIXTURE_TIMESTAMP","reason":"broad_scan_without_research_capability","session_id":"smoke-router-v3","cwd":"C:/repo/acme-tooling","tool_name":"shell_command","normalized_tool_name":"shell_command","tool_family":"shell_like","input_length":8}
+{"event":"orchestrator_observability","event_name":"stop","status":"allow","created_at":"$FIXTURE_TIMESTAMP","reason":"fixture structured acceptance","session_id":"smoke-router-v3","cwd":"C:/repo/acme-tooling","acceptance_source":"structured","acceptance":{"source":"structured","verification_status":"pass","review_status":"not_required","subagent_status":"closed","risk_status":"low","has_work_done_signal":true,"has_verification_signal":true,"has_subagent_signal":false,"footer_field_count":4,"footer_complete":true,"footer_missing_fields":[]}}
+JSONL
 mkdir -p "$SESSIONS_ROOT/2026/05/03"
 cat > "$SESSIONS_ROOT/2026/05/03/rollout-nested-meta-session.jsonl" <<'JSONL'
 {"type":"session_meta","payload":{"id":"nested-meta-session","cwd":"/tmp/repo/meta-project"},"timestamp":"2026-05-02T00:00:11Z"}
@@ -361,7 +505,6 @@ cat > "$SESSIONS_ROOT/2026/05/03/rollout-project-context-session.jsonl" <<JSONL
 JSONL
 
 "$PYTHON_BIN" "$ROOT/tests/test_session_facts_since_days.py"
-"$PYTHON_BIN" "$ROOT/tests/test_acceptance_footer_and_triage.py"
 
 "$PYTHON_BIN" "$AGENTS_HOME/skills/orchestrator-observability/scripts/analyze.py" \
   --codex-home "$CODEX_HOME" \
@@ -445,30 +588,6 @@ if sys.argv[2] in report_text or "supersecret" in report_text or "sk-1234567890a
 PY
 
 TRIAGE="$AGENTS_HOME/skills/orchestrator-observability/scripts/triage.py"
-USER_PROMPT="$CODEX_HOME/hooks/orchestrator_user_prompt.py"
-
-BENIGN_PROMPT=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
-{"prompt":"what is 2+2?","cwd":"/safe/project"}
-JSON
-)
-"$PYTHON_BIN" - "$BENIGN_PROMPT" <<'PY'
-import json
-import sys
-
-if sys.argv[1].strip():
-    raise SystemExit("Benign prompt should stay silent by default")
-PY
-
-HEAVY_PROMPT=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
-{"prompt":"please implement this feature and add tests","cwd":"/safe/project"}
-JSON
-)
-"$PYTHON_BIN" - "$HEAVY_PROMPT" <<'PY'
-import sys
-
-if sys.argv[1].strip():
-    raise SystemExit("Heavy prompt should stay silent by default unless a high-risk alert is pending")
-PY
 
 HIGH_REPORT="$REPORT_DIR/orchestrator-observability-high-smoke.json"
 cat > "$HIGH_REPORT" <<'JSON'
@@ -513,33 +632,6 @@ if obj["severity"] != "high":
 alert = pathlib.Path(sys.argv[2]) / "orchestrator-observability" / "triage" / "alerts" / "high-risk-current.json"
 if not alert.exists():
     raise SystemExit("High-risk current alert was not written")
-PY
-
-HIGH_REMINDER=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
-{"prompt":"hello","cwd":"/safe/project"}
-JSON
-)
-"$PYTHON_BIN" - "$HIGH_REMINDER" "$HIGH_REPORT" <<'PY'
-import json
-import sys
-
-obj = json.loads(sys.argv[1])
-context = obj["hookSpecificOutput"]["additionalContext"]
-if "ORCHESTRATOR HIGH-RISK ALERT" not in context:
-    raise SystemExit("High-risk reminder missing")
-if sys.argv[2] in context:
-    raise SystemExit("High-risk reminder leaked full report path")
-PY
-
-SUPPRESSED=$(CODEX_HOME="$CODEX_HOME" "$PYTHON_BIN" "$USER_PROMPT" <<'JSON'
-{"prompt":"hello again","cwd":"/safe/project"}
-JSON
-)
-"$PYTHON_BIN" - "$SUPPRESSED" <<'PY'
-import sys
-
-if sys.argv[1].strip():
-    raise SystemExit("High-risk reminder should be suppressed to a silent response within 24 hours")
 PY
 
 LOW_REPORT="$REPORT_DIR/orchestrator-observability-low-smoke.json"
@@ -771,12 +863,17 @@ if [[ -e "$UNINSTALL_AGENTS/skills/orchestrator/SKILL.md" ]]; then
   echo "uninstall.sh left orchestrator skill installed" >&2
   exit 1
 fi
-if [[ -e "$UNINSTALL_CODEX/hooks/orchestrator_user_prompt.py" ]]; then
-  echo "uninstall.sh left orchestrator hook installed" >&2
+if [[ -e "$UNINSTALL_CODEX/hooks/critical_action_gate.py" ]]; then
+  echo "uninstall.sh left critical action gate installed" >&2
+  exit 1
+fi
+if [[ -e "$UNINSTALL_CODEX/hooks/pilot_receipt_gate.py" ]]; then
+  echo "uninstall.sh left pilot receipt gate installed" >&2
   exit 1
 fi
 grep -q 'pre-existing-user-prompt.py' "$UNINSTALL_CODEX/hooks.json"
-if grep -q 'orchestrator_user_prompt.py' "$UNINSTALL_CODEX/hooks.json"; then
+grep -q 'pre-existing-pre-tool.py' "$UNINSTALL_CODEX/hooks.json"
+if grep -q 'critical_action_gate.py\|pilot_receipt_gate.py' "$UNINSTALL_CODEX/hooks.json"; then
   echo "uninstall.sh left managed hook entries in hooks.json" >&2
   exit 1
 fi

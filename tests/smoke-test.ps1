@@ -43,11 +43,6 @@ function Get-PythonCommand {
     throw 'No python executable found.'
 }
 
-function Read-JsonlLast {
-    param([Parameter(Mandatory)][string]$Path)
-    return (Get-Content -Path $Path -Tail 1 | ConvertFrom-Json)
-}
-
 function Assert-JsonField {
     param(
         $JsonText,
@@ -69,10 +64,113 @@ $fixtureBefore = Join-Path $root 'tests\fixtures\hooks.before.json'
 Copy-Item -Path $fixtureBefore -Destination $origHookPath -Force
 New-Item -ItemType Directory -Path (Join-Path $CodexHome 'agents') -Force | Out-Null
 'name = "codebase_research_explorer"' | Set-Content -Path (Join-Path $CodexHome 'agents\codebase-research-explorer.toml') -Encoding utf8
+New-Item -ItemType Directory -Path (Join-Path $AgentsHome 'skills\orchestrator') -Force | Out-Null
+$initialStaleSkillFile = Join-Path $AgentsHome 'skills\orchestrator\stale-managed-file.txt'
+'stale' | Set-Content -Path $initialStaleSkillFile -Encoding utf8
 
 $env:CODEX_HOME = $CodexHome
 $env:AGENTS_HOME = $AgentsHome
-$fixtureSinceDays = 3650
+$fixtureSinceDays = 36500
+$managedSkills = @(
+    'orchestrator',
+    'orchestrator-observability',
+    'feature-workflow',
+    'review-workflow',
+    'merge-workflow',
+    'predeploy-workflow',
+    'merge-safety'
+)
+$verifySkillInstall = Join-Path $root 'scripts\verify_skill_install.py'
+
+function Invoke-PythonScript {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $python = Get-PythonCommand
+    $pythonArgs = @()
+    if ($python.Length -gt 1) {
+        $pythonArgs += $python[1..($python.Length - 1)]
+    }
+    & $python[0] @($pythonArgs + $Arguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python script failed: $($Arguments -join ' ')"
+    }
+}
+
+function Assert-ManagedSkillsOnly {
+    param([Parameter(Mandatory)][string]$SkillsRoot)
+
+    foreach ($skill in $managedSkills) {
+        $skillPath = Join-Path $SkillsRoot "$skill\SKILL.md"
+        if (-not (Test-Path $skillPath)) {
+            throw "Missing managed skill: $skillPath"
+        }
+    }
+    $actual = @(Get-ChildItem -Path $SkillsRoot -Directory | ForEach-Object { $_.Name } | Sort-Object)
+    $expected = @($managedSkills | Sort-Object)
+    $diff = Compare-Object -ReferenceObject $expected -DifferenceObject $actual
+    if ($diff) {
+        throw "Managed skill catalog mismatch: $($actual -join ', ')"
+    }
+}
+
+function Assert-SkillParity {
+    param([Parameter(Mandatory)][string]$TargetRoot)
+
+    Invoke-PythonScript -Arguments @($verifySkillInstall, '--source', (Join-Path $root 'skills'), '--target', $TargetRoot)
+}
+
+function Assert-RouterV3HookRuntime {
+    param([Parameter(Mandatory)][string]$HooksRoot)
+
+    $actual = @(Get-ChildItem -Path $HooksRoot -File | ForEach-Object { $_.Name } | Sort-Object)
+    $expected = @('critical_action_gate.py')
+    $diff = Compare-Object -ReferenceObject $expected -DifferenceObject $actual
+    if ($diff) {
+        throw "Router v3 hook runtime mismatch: $($actual -join ', ')"
+    }
+}
+
+function Assert-RouterV3HooksJson {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $obj = Get-Content -Raw -Encoding UTF8 $Path | ConvertFrom-Json
+    $gateEntries = @()
+    $commands = @()
+    foreach ($event in $obj.hooks.PSObject.Properties) {
+        foreach ($entry in @($event.Value)) {
+            foreach ($hook in @($entry.hooks)) {
+                $command = [string]$hook.command
+                $commands += $command
+                if ($command -match 'critical_action_gate\.py') {
+                    $gateEntries += [pscustomobject]@{ Event = $event.Name; Matcher = [string]$entry.matcher }
+                }
+            }
+        }
+    }
+    $commandText = $commands -join "`n"
+    if ($gateEntries.Count -ne 1 -or $gateEntries[0].Event -ne 'PreToolUse' -or $gateEntries[0].Matcher -ne '^(Bash|exec_command)$') {
+        throw "Expected one command PreTool critical gate; found $($gateEntries | ConvertTo-Json -Compress)"
+    }
+    if ($commandText -match 'pilot_receipt_gate\.py') {
+        throw 'Retired pilot gate must not be registered.'
+    }
+    if (@($gateEntries | Where-Object { $_.Matcher -eq '*' }).Count -gt 0) {
+        throw "Managed hooks must not use wildcard matcher; found $($gateEntries | ConvertTo-Json -Compress)"
+    }
+    if (@($gateEntries | Where-Object { $_.Matcher -eq '^apply_patch$' }).Count -gt 0) {
+        throw "Critical gate must not be registered on apply_patch; found $($gateEntries | ConvertTo-Json -Compress)"
+    }
+    foreach ($legacy in @('orchestrator_user_prompt.py','orchestrator_pre_tool_use.py','orchestrator_post_tool_use.py','orchestrator_stop.py')) {
+        if ($commandText -match [regex]::Escape($legacy)) {
+            throw "Legacy managed hook still registered: $legacy"
+        }
+    }
+    foreach ($projectHook in @('pre-existing-user-prompt.py','pre-existing-pre-tool.py')) {
+        if ($commandText -notmatch [regex]::Escape($projectHook)) {
+            throw "Project hook was not preserved: $projectHook"
+        }
+    }
+}
 
 $defaultDryCodexHome = Join-Path $env:TEMP ('codex-orchestrator-kit-default-dry-codex-' + [Guid]::NewGuid().ToString('N'))
 $defaultDryAgentsHome = Join-Path $env:TEMP ('codex-orchestrator-kit-default-dry-agents-' + [Guid]::NewGuid().ToString('N'))
@@ -107,13 +205,12 @@ $installedHookPath = Join-Path $CodexHome 'hooks.json'
 $installedText = Get-Content -Raw $installedHookPath
 $installed = $installedText | ConvertFrom-Json
 $normalized = ($CodexHome -replace '\\', '/').TrimEnd('/')
-$resolvedCommand = "$normalized/hooks/orchestrator_user_prompt.py"
 
 if (-not $installed.hooks) {
     throw 'Hook install missing hooks object'
 }
-if (-not ($installedText -like "*${normalized}*orchestrator_user_prompt.py*")) {
-    throw "Resolved hook for orchestrator_user_prompt.py not found for: $CodexHome"
+if (-not ($installedText -like "*${normalized}*critical_action_gate.py*")) {
+    throw "Resolved hook for critical_action_gate.py not found for: $CodexHome"
 }
 if ($installedText -match 'C:/legacy/orchestrator_user_prompt\.py') {
     throw 'Install merge left legacy orchestrator_user_prompt.py command active.'
@@ -124,9 +221,105 @@ if ($installedText -match 'legacy.*orchestrator_pre_tool_use\.py') {
 if ($installedText -notmatch 'pre-existing-user-prompt\.py' -or $installedText -notmatch 'pre-existing-pre-tool\.py') {
     throw 'Install merge did not preserve pre-existing same-event hook entries.'
 }
+Assert-RouterV3HookRuntime -HooksRoot (Join-Path $CodexHome 'hooks')
+Assert-RouterV3HooksJson -Path $installedHookPath
 if (Test-Path (Join-Path $CodexHome 'agents\codebase-research-explorer.toml')) {
     throw 'Deprecated codebase-research-explorer agent should be removed during install.'
 }
+Assert-ManagedSkillsOnly -SkillsRoot (Join-Path $AgentsHome 'skills')
+Assert-SkillParity -TargetRoot (Join-Path $AgentsHome 'skills')
+if (Test-Path $initialStaleSkillFile) { throw 'Full install did not retire stale managed skill file.' }
+if (-not (Get-ChildItem -Path "${initialStaleSkillFile}.bak.*" -ErrorAction SilentlyContinue)) {
+    throw 'Full install did not back up stale managed skill file.'
+}
+
+$badSkills = Join-Path $env:TEMP ('codex-orchestrator-kit-bad-skills-' + [Guid]::NewGuid().ToString('N'))
+Copy-Item -Path (Join-Path $AgentsHome 'skills') -Destination $badSkills -Recurse
+New-Item -ItemType Directory -Path (Join-Path $badSkills 'orchestrator\__pycache__') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $badSkills 'orchestrator\.bak.20260722') -Force | Out-Null
+'ignored' | Set-Content -Path (Join-Path $badSkills 'orchestrator\__pycache__\ignored.pyc') -Encoding utf8
+'ignored' | Set-Content -Path (Join-Path $badSkills 'orchestrator\.bak.20260722\SKILL.md') -Encoding utf8
+'ignored' | Set-Content -Path (Join-Path $badSkills 'orchestrator\SKILL.md.bak.20260722') -Encoding utf8
+Assert-SkillParity -TargetRoot $badSkills
+Add-Content -Path (Join-Path $badSkills 'orchestrator\SKILL.md') -Value '# tampered' -Encoding utf8
+$skillParityMismatchFailed = $false
+try {
+    Assert-SkillParity -TargetRoot $badSkills
+} catch {
+    $skillParityMismatchFailed = $_.Exception.Message -like '*SHA-256*' -or $_.Exception.Message -like '*verify_skill_install*'
+}
+if (-not $skillParityMismatchFailed) {
+    throw 'verify_skill_install.py should fail on SHA-256 mismatch.'
+}
+
+$skillsOnlyCodex = Join-Path $env:TEMP ('codex-orchestrator-kit-skills-only-codex-' + [Guid]::NewGuid().ToString('N'))
+$skillsOnlyAgents = Join-Path $env:TEMP ('codex-orchestrator-kit-skills-only-agents-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $skillsOnlyCodex 'agents') -Force | Out-Null
+$skillsOnlyHooks = Join-Path $skillsOnlyCodex 'hooks.json'
+'{"hooks":{"UserPromptSubmit":[]}}' | Set-Content -Path $skillsOnlyHooks -Encoding utf8
+'sentinel = true' | Set-Content -Path (Join-Path $skillsOnlyCodex 'config.toml') -Encoding utf8
+'name = "keep_me"' | Set-Content -Path (Join-Path $skillsOnlyCodex 'agents\keep-me.toml') -Encoding utf8
+New-Item -ItemType Directory -Path (Join-Path $skillsOnlyCodex 'hooks') -Force | Out-Null
+'keep' | Set-Content -Path (Join-Path $skillsOnlyCodex 'hooks\keep-me.py') -Encoding utf8
+$skillsOnlyHooksBefore = Get-Content -Raw $skillsOnlyHooks
+$skillsOnlyConfigBefore = Get-Content -Raw (Join-Path $skillsOnlyCodex 'config.toml')
+& (Join-Path $root 'install.ps1') -CodexHome $skillsOnlyCodex -AgentsHome $skillsOnlyAgents -Apply -SkillsOnly -SkillsMode agents | Out-Null
+Assert-ManagedSkillsOnly -SkillsRoot (Join-Path $skillsOnlyAgents 'skills')
+Assert-SkillParity -TargetRoot (Join-Path $skillsOnlyAgents 'skills')
+if ((Get-Content -Raw $skillsOnlyHooks) -ne $skillsOnlyHooksBefore) {
+    throw 'SkillsOnly install mutated hooks.json.'
+}
+if (-not (Test-Path (Join-Path $skillsOnlyCodex 'agents\keep-me.toml'))) {
+    throw 'SkillsOnly install mutated agents directory.'
+}
+if (-not (Test-Path (Join-Path $skillsOnlyCodex 'hooks\keep-me.py'))) {
+    throw 'SkillsOnly install mutated hooks directory.'
+}
+if ((Get-Content -Raw (Join-Path $skillsOnlyCodex 'config.toml')) -ne $skillsOnlyConfigBefore) {
+    throw 'SkillsOnly install mutated config.toml.'
+}
+& (Join-Path $root 'uninstall.ps1') -CodexHome $skillsOnlyCodex -AgentsHome $skillsOnlyAgents -SkillsOnly -SkillsMode agents | Out-Null
+if (Test-Path (Join-Path $skillsOnlyAgents 'skills\orchestrator\SKILL.md')) {
+    throw 'SkillsOnly uninstall did not remove installed skills.'
+}
+if ((Get-Content -Raw $skillsOnlyHooks) -ne $skillsOnlyHooksBefore) {
+    throw 'SkillsOnly uninstall mutated hooks.json.'
+}
+if (-not (Test-Path (Join-Path $skillsOnlyCodex 'agents\keep-me.toml'))) {
+    throw 'SkillsOnly uninstall mutated agents directory.'
+}
+if (-not (Test-Path (Join-Path $skillsOnlyCodex 'hooks\keep-me.py'))) {
+    throw 'SkillsOnly uninstall mutated hooks directory.'
+}
+if ((Get-Content -Raw (Join-Path $skillsOnlyCodex 'config.toml')) -ne $skillsOnlyConfigBefore) {
+    throw 'SkillsOnly uninstall mutated config.toml.'
+}
+
+$skillsOnlyCodexMode = Join-Path $env:TEMP ('codex-orchestrator-kit-skills-only-codex-mode-' + [Guid]::NewGuid().ToString('N'))
+$skillsOnlyCodexModeAgents = Join-Path $env:TEMP ('codex-orchestrator-kit-skills-only-codex-mode-agents-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $skillsOnlyCodexMode 'skills\orchestrator') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $skillsOnlyCodexMode 'agents') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $skillsOnlyCodexMode 'hooks') -Force | Out-Null
+$codexModeStale = Join-Path $skillsOnlyCodexMode 'skills\orchestrator\stale-managed-file.txt'
+'stale' | Set-Content -Path $codexModeStale -Encoding utf8
+'{"hooks":{"UserPromptSubmit":[]}}' | Set-Content -Path (Join-Path $skillsOnlyCodexMode 'hooks.json') -Encoding utf8
+'sentinel = true' | Set-Content -Path (Join-Path $skillsOnlyCodexMode 'config.toml') -Encoding utf8
+'keep' | Set-Content -Path (Join-Path $skillsOnlyCodexMode 'agents\keep-me.toml') -Encoding utf8
+'keep' | Set-Content -Path (Join-Path $skillsOnlyCodexMode 'hooks\keep-me.py') -Encoding utf8
+& (Join-Path $root 'install.ps1') -CodexHome $skillsOnlyCodexMode -AgentsHome $skillsOnlyCodexModeAgents -Apply -SkillsOnly -SkillsMode codex | Out-Null
+Assert-ManagedSkillsOnly -SkillsRoot (Join-Path $skillsOnlyCodexMode 'skills')
+Assert-SkillParity -TargetRoot (Join-Path $skillsOnlyCodexMode 'skills')
+if (Test-Path $codexModeStale) { throw 'Codex SkillsOnly install did not retire stale managed skill file.' }
+if (-not (Get-ChildItem -Path "${codexModeStale}.bak.*" -ErrorAction SilentlyContinue)) {
+    throw 'Codex SkillsOnly install did not back up stale managed skill file.'
+}
+if (-not (Test-Path (Join-Path $skillsOnlyCodexMode 'agents\keep-me.toml'))) { throw 'Codex SkillsOnly install mutated agents.' }
+if (-not (Test-Path (Join-Path $skillsOnlyCodexMode 'hooks\keep-me.py'))) { throw 'Codex SkillsOnly install mutated hooks.' }
+if ((Get-Content -Raw (Join-Path $skillsOnlyCodexMode 'config.toml')) -notmatch 'sentinel = true') { throw 'Codex SkillsOnly install mutated config.' }
+& (Join-Path $root 'uninstall.ps1') -CodexHome $skillsOnlyCodexMode -AgentsHome $skillsOnlyCodexModeAgents -SkillsOnly -SkillsMode codex | Out-Null
+if (Test-Path (Join-Path $skillsOnlyCodexMode 'skills\orchestrator\SKILL.md')) { throw 'Codex SkillsOnly uninstall did not remove skills.' }
+if (-not (Test-Path (Join-Path $skillsOnlyCodexMode 'agents\keep-me.toml'))) { throw 'Codex SkillsOnly uninstall mutated agents.' }
+if (-not (Test-Path (Join-Path $skillsOnlyCodexMode 'hooks\keep-me.py'))) { throw 'Codex SkillsOnly uninstall mutated hooks.' }
 
 $dryCodexHome = Join-Path $env:TEMP ('codex-orchestrator-kit-dry-codex-' + [Guid]::NewGuid().ToString('N'))
 $dryAgentsHome = Join-Path $env:TEMP ('codex-orchestrator-kit-dry-agents-' + [Guid]::NewGuid().ToString('N'))
@@ -154,7 +347,16 @@ try {
     $env:CODEX_ORCHESTRATOR_PYTHON = 'C:\Program Files\Python\python.exe'
     & (Join-Path $root 'install.ps1') -CodexHome $overrideCodexHome -AgentsHome $overrideAgentsHome -Apply -HookMode auto -SkillsMode auto | Out-Null
     $overrideHooks = Get-Content -Raw (Join-Path $overrideCodexHome 'hooks.json') | ConvertFrom-Json
-    $overrideCommand = $overrideHooks.hooks.UserPromptSubmit[0].hooks[0].command
+    $overrideCommands = @(
+        $overrideHooks.hooks.PreToolUse |
+            ForEach-Object { $_.hooks } |
+            Where-Object { $_.command -match 'critical_action_gate\.py' } |
+            ForEach-Object { $_.command }
+    )
+    if ($overrideCommands.Count -ne 1) {
+        throw "Python override install missing single critical gate: $($overrideCommands -join ', ')"
+    }
+    $overrideCommand = $overrideCommands[0]
     if (-not $overrideCommand.StartsWith('"C:\Program Files\Python\python.exe" ')) {
         throw "Python override with spaces was not quoted in hook command: $overrideCommand"
     }
@@ -168,15 +370,16 @@ try {
 
 & (Join-Path $root 'install.ps1') -CodexHome $CodexHome -AgentsHome $AgentsHome -Apply -HookMode auto -SkillsMode auto | Out-Null
 $installedText = Get-Content -Raw $installedHookPath
-if ([regex]::Matches($installedText, 'orchestrator_user_prompt\.py').Count -ne 1) {
-    throw 'Install is not idempotent: duplicate orchestrator_user_prompt.py hook entry found.'
+if ([regex]::Matches($installedText, 'critical_action_gate\.py').Count -ne 1) {
+    throw 'Install is not idempotent: duplicate critical_action_gate.py hook entry found.'
 }
+if ([regex]::Matches($installedText, 'pilot_receipt_gate\.py').Count -ne 0) {
+    throw 'Retired pilot_receipt_gate.py should not be registered.'
+}
+Assert-RouterV3HooksJson -Path $installedHookPath
 
 $requiredFiles = @(
-    (Join-Path $AgentsHome 'skills\orchestrator\SKILL.md'),
-    (Join-Path $AgentsHome 'skills\orchestrator-observability\SKILL.md'),
-    (Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py'),
-    (Join-Path $CodexHome 'hooks\orchestrator_observability.py'),
+    (Join-Path $CodexHome 'hooks\critical_action_gate.py'),
     (Join-Path $CodexHome 'agents\critic.toml')
 )
 
@@ -231,253 +434,73 @@ if (-not (Test-Path (Join-Path $registeredProject '.codex\project-context.md')))
     throw 'register-project did not write project context template.'
 }
 
-$userPrompt = Join-Path $CodexHome 'hooks\orchestrator_user_prompt.py'
-$preTool = Join-Path $CodexHome 'hooks\orchestrator_pre_tool_use.py'
-$postTool = Join-Path $CodexHome 'hooks\orchestrator_post_tool_use.py'
-$stopHook = Join-Path $CodexHome 'hooks\orchestrator_stop.py'
-
-$heavyPromptOutput = Invoke-PythonHook -Script $userPrompt -InputJson '{"prompt":"please implement this feature and add tests"}'
-if (-not [string]::IsNullOrWhiteSpace($heavyPromptOutput)) {
-    throw 'UserPromptSubmit heavy prompt should stay silent by default.'
+$criticalGate = Join-Path $CodexHome 'hooks\critical_action_gate.py'
+$ordinaryGateOutput = Invoke-PythonHook -Script $criticalGate -InputJson '{"tool_name":"Bash","tool_input":{"cmd":"python -V"}}'
+if (-not [string]::IsNullOrWhiteSpace(($ordinaryGateOutput -join ''))) {
+    throw 'Ordinary Bash fast path should stay silent.'
 }
 
-$benignPromptOutput = Invoke-PythonHook -Script $userPrompt -InputJson '{"prompt":"what is 2+2?"}'
-if (-not [string]::IsNullOrWhiteSpace($benignPromptOutput)) {
-    throw 'UserPromptSubmit benign prompt should stay silent by default.'
-}
-
-$preSoftOutput = Invoke-PythonHook -Script $preTool -InputJson '{"tool_name":"bash","tool_input":{"command":"rg --files"}}'
-if (-not [string]::IsNullOrWhiteSpace($preSoftOutput)) {
-    throw 'PreToolUse broad scan should not hard-block under the default soft workflow policy.'
-}
-
-$hardPolicyRepo = Join-Path $env:TEMP ('pretool-hard-policy-' + [Guid]::NewGuid().ToString('N'))
-$hardPolicyCodex = Join-Path $hardPolicyRepo '.codex'
-New-Item -ItemType Directory -Path $hardPolicyCodex -Force | Out-Null
-$hardPolicyProfile = @'
-project_id = "pretool-hard"
-[workflow_profile]
-pretool_policy = "hard"
-'@
-[System.IO.File]::WriteAllText((Join-Path $hardPolicyCodex 'review-profile.toml'), $hardPolicyProfile, [System.Text.UTF8Encoding]::new($false))
-
-$hardPolicyTranscript = Join-Path $hardPolicyCodex 'sessions\2026\05\02\pre.jsonl'
-New-Item -ItemType Directory -Path (Split-Path -Parent $hardPolicyTranscript) -Force | Out-Null
-$hardPolicyTranscriptContent = @'
-{"payload":{"type":"message","role":"user","content":"please inspect the repo"}}
-'@
-[System.IO.File]::WriteAllText($hardPolicyTranscript, $hardPolicyTranscriptContent, [System.Text.UTF8Encoding]::new($false))
-
-$preHardBlockOutput = Invoke-PythonHook -Script $preTool -InputJson (@{
-    cwd = $hardPolicyRepo
-    transcript_path = $hardPolicyTranscript
-    tool_name = 'bash'
-    tool_input = @{ command = 'rg --files' }
-} | ConvertTo-Json -Compress -Depth 10)
-Assert-JsonField -JsonText $preHardBlockOutput -Predicate {
+$dangerousGateOutput = Invoke-PythonHook -Script $criticalGate -InputJson '{"tool_name":"Bash","tool_input":{"cmd":"git push origin feature/demo"}}'
+Assert-JsonField -JsonText $dangerousGateOutput -Predicate {
     param($value)
-    $value.decision -eq 'block'
-} -Message 'PreToolUse broad scan did not block under hard workflow policy.'
-
-$largeResponse = 'x' * 60001
-$postBlockPayload = @{ tool_name = 'bash'; tool_response = $largeResponse } | ConvertTo-Json -Compress
-$postBlockOutput = Invoke-PythonHook -Script $postTool -InputJson $postBlockPayload
-Assert-JsonField -JsonText $postBlockOutput -Predicate {
-    param($value)
-    $value.decision -eq 'block' -and $value.continue -eq $false
-} -Message 'PostToolUse large Bash output did not block.'
-
-$postShellCommandBlockPayload = @{ tool_name = 'shell_command'; tool_response = $largeResponse } | ConvertTo-Json -Compress
-$postShellCommandBlockOutput = Invoke-PythonHook -Script $postTool -InputJson $postShellCommandBlockPayload
-Assert-JsonField -JsonText $postShellCommandBlockOutput -Predicate {
-    param($value)
-    $value.decision -eq 'block' -and $value.continue -eq $false
-} -Message 'PostToolUse large shell_command output did not block.'
-
-$postPassPayload = @{ tool_name = 'python'; tool_response = $largeResponse } | ConvertTo-Json -Compress
-$postPassOutput = Invoke-PythonHook -Script $postTool -InputJson $postPassPayload
-if (-not [string]::IsNullOrWhiteSpace(($postPassOutput -join ''))) {
-    throw 'PostToolUse non-Bash large output should not block.'
-}
-
-$stopMissingVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change in the portable kit, updated multiple files, and changed installer behavior for migration."}'
-Assert-JsonField -JsonText $stopMissingVerification -Predicate {
-    param($value)
-    $value.continue -eq $true
-} -Message 'Stop hook should allow user-facing summaries without forcing visible acceptance metadata.'
-
-$stopPartialFooter = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=pass\nreview_status=pass"}'
-Assert-JsonField -JsonText $stopPartialFooter -Predicate {
-    param($value)
-    $value.continue -eq $true
-} -Message 'Stop hook should not block partial acceptance formatting.'
-
-$stopPartialVerification = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=medium；live client validation remains."}'
-Assert-JsonField -JsonText $stopPartialVerification -Predicate {
-    param($value)
-    $value.continue -eq $true
-} -Message 'Stop hook should allow explained partial verification with non-low risk.'
-
-$stopLowRiskPartial = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented the requested change.\nverification_status=partial；ran smoke checks but deferred live client validation.\nreview_status=pass\nsubagent_status=not_used\nrisk_status=low"}'
-Assert-JsonField -JsonText $stopLowRiskPartial -Predicate {
-    param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Verification claim conflicts with the summary.'
-} -Message 'Stop hook should block partial verification paired with low risk while suppressing UI output.'
-
-$stopUnsafeGitDirective = Invoke-PythonHook -Script $stopHook -InputJson '{"last_assistant_message":"implemented change.\n:: git-commit{branch=\"main\"}"}'
-Assert-JsonField -JsonText $stopUnsafeGitDirective -Predicate {
-    param($value)
-    $value.decision -eq 'block' -and
-    $value.reason -like '*::git-*' -and
-    $value.reason -like '*renderer*'
-} -Message 'Stop hook did not block unsafe git directives.'
+    $value.hookSpecificOutput.permissionDecision -eq 'deny' -and
+        $value.hookSpecificOutput.permissionDecisionReason -like '*current-turn*'
+} -Message 'Unauthorized push candidate was not blocked by critical action gate.'
 
 $hooksJsonBytes = [System.IO.File]::ReadAllBytes((Join-Path $CodexHome 'hooks.json'))
 if ($hooksJsonBytes.Length -ge 3 -and $hooksJsonBytes[0] -eq 0xEF -and $hooksJsonBytes[1] -eq 0xBB -and $hooksJsonBytes[2] -eq 0xBF) {
     throw 'Installed hooks.json must be UTF-8 without BOM.'
 }
 
-$transcript = Join-Path $CodexHome 'transcript-subagent.jsonl'
-$transcriptContent = @(
-    '{"payload":{"type":"message","role":"user","content":"implement a feature"}}',
-    '{"payload":{"name":"spawn_agent"}}'
-) -join "`n"
-[System.IO.File]::WriteAllText($transcript, $transcriptContent, [System.Text.UTF8Encoding]::new($false))
-
-$stopLifecyclePayload = @{ transcript_path = $transcript; last_assistant_message = 'implemented the requested change in the portable kit and updated installer behavior. Verification: tests run.' } | ConvertTo-Json -Compress
-$stopLifecycleOutput = Invoke-PythonHook -Script $stopHook -InputJson $stopLifecyclePayload
-Assert-JsonField -JsonText $stopLifecycleOutput -Predicate {
-    param($value)
-    $value.decision -eq 'block' -and $value.suppressOutput -eq $true -and $value.reason -eq 'Subagent lifecycle is incomplete.'
-} -Message 'Stop hook should block missing subagent lifecycle while suppressing UI output.'
-
-$transcriptContent = @(
-    '{"payload":{"type":"message","role":"user","content":"implement a feature"}}',
-    '{"payload":{"name":"spawn_agent"}}',
-    '{"payload":{"name":"close_agent"}}'
-) -join "`n"
-[System.IO.File]::WriteAllText($transcript, $transcriptContent, [System.Text.UTF8Encoding]::new($false))
-
-$stopPassPayload = @{
-    transcript_path = $transcript
-    last_assistant_message = 'implemented the requested change in the portable kit and updated installer behavior. Verification: tests run.'
-} | ConvertTo-Json -Compress
-$stopPassOutput = Invoke-PythonHook -Script $stopHook -InputJson $stopPassPayload
-Assert-JsonField -JsonText $stopPassOutput -Predicate {
-    param($value)
-    $value.continue -eq $true
-} -Message 'Stop hook did not pass when lifecycle was clean without visible acceptance fields.'
-
-$structuredAcceptanceMessage = @'
-implemented the requested change in the portable kit and updated installer behavior.
-verification_status=pass
-review_status=not_required
-subagent_status=closed
-risk_status=low
-'@
-$structuredStopPayload = @{ transcript_path = $transcript; last_assistant_message = $structuredAcceptanceMessage } | ConvertTo-Json -Compress
-$structuredStopOutput = Invoke-PythonHook -Script $stopHook -InputJson $structuredStopPayload
-Assert-JsonField -JsonText $structuredStopOutput -Predicate {
-    param($value)
-    $value.continue -eq $true
-} -Message 'Stop hook did not pass with structured acceptance footer.'
-
 $sessionsRoot = Join-Path $CodexHome 'sessions'
 New-Item -ItemType Directory -Path $sessionsRoot -Force | Out-Null
-$transcriptForObservability = Join-Path $sessionsRoot 'smoke-observability.jsonl'
-$eventsRoot = Join-Path $CodexHome 'orchestrator-observability\events'
-
-$preNoCapture = Invoke-PythonHook -Script $preTool -InputJson (@{
-    tool_name = 'bash'
-    tool_input = @{ command = 'echo hi' }
-    transcript_path = $transcriptForObservability
-} | ConvertTo-Json -Compress -Depth 10)
-if (-not [string]::IsNullOrWhiteSpace($preNoCapture)) {
-    throw 'PreToolUse non-blocking execution should not emit JSON block payload.'
-}
-
-Remove-Item Env:ORCHESTRATOR_OBSERVABILITY_CAPTURE_TEXT -ErrorAction SilentlyContinue
-$eventLog = Get-ChildItem -Path $eventsRoot -Filter '*.jsonl' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $eventLog) {
-    throw 'No observability event log was written.'
-}
-$preNoCaptureEvent = Read-JsonlLast -Path $eventLog.FullName
-if ($preNoCaptureEvent.event -ne 'orchestrator_observability') {
-    throw 'Observability event for pre_tool_use was not written.'
-}
-if ($preNoCaptureEvent.transcript_path -eq $transcriptForObservability -or $preNoCaptureEvent.transcript_path -notmatch '^session:') {
-    throw 'Observability event should redact transcript_path metadata by default.'
-}
-if ($preNoCaptureEvent.PSObject.Properties.Name -contains 'captured_text') {
-    if ($preNoCaptureEvent.captured_text) {
-        throw 'Capture text default should be disabled for privacy.'
-    }
-}
-if ($preNoCaptureEvent.event_name -ne 'pre_tool_use') {
-    throw 'Expected pre_tool_use observability event.'
-}
-if ($preNoCaptureEvent.normalized_tool_name -ne 'bash' -or $preNoCaptureEvent.tool_family -ne 'shell_like' -or $preNoCaptureEvent.input_length -lt 1) {
-    throw 'PreToolUse observability event missing normalized tool-surface metadata.'
-}
-if (Test-Path $transcriptForObservability) {
-    throw 'Observability logging should not append to Codex transcript files.'
-}
-if ((Get-Content -Raw $eventLog.FullName) -match "`r`n`r`n") {
-    throw 'Observability event should be compact JSONL (single-line entries).'
-}
-
-$postNonShellMetadataPayload = @{
-    tool_name = 'python'
-    tool_response = $largeResponse
-    transcript_path = $transcriptForObservability
-} | ConvertTo-Json -Compress
-$postNonShellMetadataOutput = Invoke-PythonHook -Script $postTool -InputJson $postNonShellMetadataPayload
-if (-not [string]::IsNullOrWhiteSpace(($postNonShellMetadataOutput -join ''))) {
-    throw 'PostToolUse non-shell metadata case should not block.'
-}
-$postNonShellEvent = Read-JsonlLast -Path $eventLog.FullName
-if ($postNonShellEvent.event_name -ne 'post_tool_use' -or $postNonShellEvent.normalized_tool_name -ne 'python' -or $postNonShellEvent.tool_family -ne 'generic' -or $postNonShellEvent.output_length -lt 60001) {
-    throw 'PostToolUse non-shell event missing normalized tool-surface metadata.'
-}
-
-# Synthetic fixture secret used only to verify redaction behavior.
-$env:ORCHESTRATOR_OBSERVABILITY_CAPTURE_TEXT = '1'
-$fakeSecret = 'sk-' + '1234567890abcdefghijklmnopqrstuvwxyz'
-$preCapture = Invoke-PythonHook -Script $preTool -InputJson (@{
-    tool_name = 'bash'
-    tool_input = @{ command = "echo API_KEY=$fakeSecret" }
-    transcript_path = $transcriptForObservability
-} | ConvertTo-Json -Compress -Depth 10)
-if (-not [string]::IsNullOrWhiteSpace($preCapture)) {
-    throw 'Captured pre_tool_use should not emit a block decision.'
-}
-$preCaptureEvent = Read-JsonlLast -Path $eventLog.FullName
-if (-not ($preCaptureEvent.PSObject.Properties.Name -contains 'captured_text') -or -not $preCaptureEvent.captured_text) {
-    throw 'Capture text was enabled but no captured text was recorded.'
-}
-if ($preCaptureEvent.captured_text -match [regex]::Escape($fakeSecret)) {
-    throw 'Sensitive key was not redacted from captured text.'
-}
-
-$structuredPassword = 'hunter' + '2'
-$structuredApiKey = 'abc' + '123'
-$structuredSecretJson = '{"password":"' + $structuredPassword + '","api_key":"' + $structuredApiKey + '"}'
-$preStructuredCapture = Invoke-PythonHook -Script $preTool -InputJson (@{
-    tool_name = 'bash'
-    tool_input = @{ command = "echo $structuredSecretJson" }
-    transcript_path = $transcriptForObservability
-} | ConvertTo-Json -Compress -Depth 10)
-if (-not [string]::IsNullOrWhiteSpace($preStructuredCapture)) {
-    throw 'Structured captured pre_tool_use should not emit a block decision.'
-}
-$preStructuredEvent = Read-JsonlLast -Path $eventLog.FullName
-if ($preStructuredEvent.captured_text -match [regex]::Escape($structuredPassword) -or $preStructuredEvent.captured_text -match [regex]::Escape($structuredApiKey)) {
-    throw 'Structured secret values were not redacted from captured text.'
-}
 
 $analyzerFixture = Join-Path $root 'tests\fixtures\session-observability.jsonl'
 $fixtureSession = Join-Path $sessionsRoot 'session-observability.jsonl'
 Copy-Item -Path $analyzerFixture -Destination $fixtureSession -Force
+$fixtureTimestamp = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+$preToolFixture = @{
+    event = 'orchestrator_observability'
+    event_name = 'pre_tool_use'
+    status = 'blocked'
+    created_at = $fixtureTimestamp
+    reason = 'broad_scan_without_research_capability'
+    session_id = 'smoke-router-v3'
+    cwd = 'C:\repo\acme-tooling'
+    tool_name = 'shell_command'
+    normalized_tool_name = 'shell_command'
+    tool_family = 'shell_like'
+    input_length = 8
+} | ConvertTo-Json -Compress -Depth 10
+$structuredStopFixture = @{
+    event = 'orchestrator_observability'
+    event_name = 'stop'
+    status = 'allow'
+    created_at = $fixtureTimestamp
+    reason = 'fixture structured acceptance'
+    session_id = 'smoke-router-v3'
+    cwd = 'C:\repo\acme-tooling'
+    acceptance_source = 'structured'
+    acceptance = @{
+        source = 'structured'
+        verification_status = 'pass'
+        review_status = 'not_required'
+        subagent_status = 'closed'
+        risk_status = 'low'
+        has_work_done_signal = $true
+        has_verification_signal = $true
+        has_subagent_signal = $false
+        footer_field_count = 4
+        footer_complete = $true
+        footer_missing_fields = @()
+    }
+} | ConvertTo-Json -Compress -Depth 10
+$fixtureNewLine = [Environment]::NewLine
+[System.IO.File]::AppendAllText(
+    $fixtureSession,
+    "$fixtureNewLine$preToolFixture$fixtureNewLine$structuredStopFixture",
+    [System.Text.UTF8Encoding]::new($false)
+)
 $largeCustomOutput = 'y' * 70000
 $customToolCall = @{ payload = @{ type = 'custom_tool_call'; name = 'apply_patch' }; timestamp = '2026-05-02T00:00:09Z' } | ConvertTo-Json -Compress -Depth 10
 $customToolOutput = @{ payload = @{ type = 'custom_tool_call_output'; output = $largeCustomOutput }; timestamp = '2026-05-02T00:00:10Z' } | ConvertTo-Json -Compress -Depth 10
@@ -521,7 +544,6 @@ if ($python.Length -gt 1) {
     $unitArgs += $python[1..($python.Length - 1)]
 }
 & $python[0] @($unitArgs + (Join-Path $root 'tests\test_session_facts_since_days.py'))
-& $python[0] @($unitArgs + (Join-Path $root 'tests\test_acceptance_footer_and_triage.py'))
 $analyzerOutput = & $python[0] @($python[1..($python.Length - 1)] + $analyzer + @('--codex-home', $CodexHome, '--since-days', $fixtureSinceDays, '--report-id', $reportId))
 $analyzerOutputObj = $analyzerOutput | ConvertFrom-Json
 if ($analyzerOutputObj.totals.orchestrator_events -lt 3) {
@@ -625,7 +647,7 @@ $structuredStopFact = $reportObj.facts | Where-Object {
 if (-not $structuredStopFact) {
     throw 'Analyzer facts did not preserve structured acceptance fields.'
 }
-if (-not ($reportObj.facts | Where-Object { $_.event_type -eq 'orchestrator_pre_tool_use' -and $_.tool_name -eq 'bash' -and $_.normalized_tool_name -eq 'bash' })) {
+if (-not ($reportObj.facts | Where-Object { $_.event_type -eq 'orchestrator_pre_tool_use' -and $_.tool_name -eq 'shell_command' -and $_.normalized_tool_name -eq 'shell_command' })) {
     throw 'Analyzer facts did not preserve orchestrator event tool_name and normalized alias.'
 }
 $structuredVerifiedProp = $reportObj.structured_acceptance.PSObject.Properties | Where-Object { $_.Name -eq 'structured_acceptance_verified' } | Select-Object -First 1
@@ -707,44 +729,8 @@ if ($highTriage.severity -ne 'high') {
 }
 $currentAlert = Join-Path $CodexHome 'orchestrator-observability\triage\alerts\high-risk-current.json'
 if (-not (Test-Path $currentAlert)) {
-    throw 'High-risk triage did not write high-risk-current alert for UserPromptSubmit handoff.'
+    throw 'High-risk triage did not write high-risk-current alert.'
 }
-
-$highReminderOutput = Invoke-PythonHook -Script $userPrompt -InputJson (@{
-    prompt = 'hello'
-    cwd = 'C:\safe\project'
-} | ConvertTo-Json -Compress)
-Assert-JsonField -JsonText $highReminderOutput -Predicate {
-    param($value)
-    $context = $value.hookSpecificOutput.additionalContext
-    $context -like '*ORCHESTRATOR HIGH-RISK ALERT*' -and
-    $context -like '*high-risk*' -and
-    $context -notlike "*$highReportPath*"
-} -Message 'UserPromptSubmit did not emit privacy-bounded high-risk reminder.'
-
-$alertAfterReminder = Get-Content -Raw -Encoding UTF8 $currentAlert | ConvertFrom-Json
-if ($alertAfterReminder.reminder_count -lt 1 -or -not $alertAfterReminder.last_reminded_at) {
-    throw 'UserPromptSubmit did not update high-risk reminder cooldown state.'
-}
-
-$suppressedReminderOutput = Invoke-PythonHook -Script $userPrompt -InputJson (@{
-    prompt = 'hello again'
-    cwd = 'C:\safe\project'
-} | ConvertTo-Json -Compress)
-if (-not [string]::IsNullOrWhiteSpace($suppressedReminderOutput)) {
-    throw 'UserPromptSubmit should suppress repeated high-risk reminder without routine context.'
-}
-
-$alertState = Get-Content -Raw -Encoding UTF8 $currentAlert | ConvertFrom-Json
-$alertState.last_reminded_at = '2000-01-01T00:00:00Z'
-$alertState | ConvertTo-Json -Depth 10 | Set-Content -Path $currentAlert -Encoding utf8
-$combinedReminderOutput = Invoke-PythonHook -Script $userPrompt -InputJson '{"prompt":"please implement this feature and add tests"}'
-Assert-JsonField -JsonText $combinedReminderOutput -Predicate {
-    param($value)
-    $context = $value.hookSpecificOutput.additionalContext
-    $context -like '*ORCHESTRATOR HIGH-RISK ALERT*' -and
-    $context -notlike '*ORCHESTRATOR CHECK*'
-} -Message 'UserPromptSubmit should emit only the short high-risk reminder.'
 
 $lowReportPath = Join-Path $triageReportDir 'orchestrator-observability-low-smoke.json'
 $lowReport = @{
@@ -952,18 +938,18 @@ if (Test-Path (Join-Path $AgentsHome 'skills\orchestrator-observability\SKILL.md
 if (-not (Test-Path (Join-Path $AgentsHome 'skills\demo-observability\SKILL.md'))) {
     throw 'Default uninstall should preserve external reviewer packs.'
 }
-if (Test-Path (Join-Path $CodexHome 'hooks\orchestrator_user_prompt.py')) {
-    throw 'Uninstall did not remove orchestrator hook script.'
+if (Test-Path (Join-Path $CodexHome 'hooks\critical_action_gate.py')) {
+    throw 'Uninstall did not remove critical action gate.'
 }
-if (Test-Path (Join-Path $CodexHome 'hooks\orchestrator_observability.py')) {
-    throw 'Uninstall did not remove observability helper hook file.'
+if (Test-Path (Join-Path $CodexHome 'hooks\pilot_receipt_gate.py')) {
+    throw 'Uninstall did not remove pilot receipt gate.'
 }
 $uninstalledHooks = Get-Content -Raw $installedHookPath
-if ($uninstalledHooks -match 'orchestrator_(pre_tool_use|post_tool_use|stop|user_prompt)\.py') {
-    throw 'Uninstall did not strip orchestrator hook entries.'
+if ($uninstalledHooks -match 'critical_action_gate\.py|pilot_receipt_gate\.py') {
+    throw 'Uninstall did not strip managed hook entries.'
 }
 if ($uninstalledHooks -notmatch 'pre-existing-user-prompt\.py' -or $uninstalledHooks -notmatch 'pre-existing-pre-tool\.py') {
-    throw 'Uninstall removed the pre-existing hook entry.'
+    throw 'Uninstall removed a pre-existing project hook entry.'
 }
 
 Write-Host "smoke-test passed"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import calendar
 from dataclasses import dataclass
@@ -94,6 +95,8 @@ _NORMALIZED_TOOL_NAMES = {
     "spawn_agent": "spawn_agent",
     "wait_agent": "wait_agent",
     "close_agent": "close_agent",
+    "followup_task": "followup_task",
+    "send_message": "send_message",
 }
 
 
@@ -139,6 +142,18 @@ def iter_jsonl_records(paths: Iterable[Path]) -> Iterator[tuple[Path, int, Optio
                     break
                 line_no += raw_text[cursor:next_newline + 1].count("\n")
                 cursor = next_newline + 1
+
+
+def _record_fingerprint(record: dict) -> str:
+    normalized = dict(record)
+    normalized.pop("session_id", None)
+    payload = normalized.get("payload")
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload.pop("session_id", None)
+        normalized["payload"] = payload
+    encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _end_of_day(year: int, month: int, day: int) -> Optional[datetime]:
@@ -258,7 +273,7 @@ def classify_event(record: dict) -> str:
     payload_type = payload.get("type")
     if payload_type == "function_call":
         name = str(payload.get("name") or "unknown")
-        if name in {"spawn_agent", "wait_agent", "close_agent"}:
+        if name in {"spawn_agent", "wait_agent", "close_agent", "followup_task", "send_message"}:
             return f"transcript_subagent_{name}"
         return "transcript_function_call"
     if payload_type == "function_call_output":
@@ -335,6 +350,33 @@ def extract_token_count(payload: dict) -> int:
     return 0
 
 
+def extract_token_usage(payload: dict) -> Dict[str, int]:
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        info = payload
+    usage = info.get("total_token_usage")
+    if not isinstance(usage, dict):
+        usage = info.get("last_token_usage")
+    if not isinstance(usage, dict):
+        total = extract_token_count(payload)
+        return {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "total_tokens": total,
+        }
+    return {
+        "input_tokens": int(usage.get("input_tokens", 0) or 0),
+        "cached_input_tokens": int(usage.get("cached_input_tokens", 0) or 0),
+        "cache_write_input_tokens": int(usage.get("cache_write_input_tokens", 0) or 0),
+        "output_tokens": int(usage.get("output_tokens", 0) or 0),
+        "reasoning_output_tokens": int(usage.get("reasoning_output_tokens", 0) or 0),
+        "total_tokens": int(usage.get("total_tokens", 0) or 0),
+    }
+
+
 def _contains_pattern(patterns: List[re.Pattern], text: str) -> bool:
     return any(regex.search(text) for regex in patterns)
 
@@ -350,7 +392,7 @@ def normalize_tool_family(tool_name: str) -> str:
     normalized = normalize_tool_name(tool_name)
     if normalized in {"bash", "powershell", "shell_command"}:
         return "shell_like"
-    if normalized in {"spawn_agent", "wait_agent", "close_agent"}:
+    if normalized in {"spawn_agent", "wait_agent", "close_agent", "followup_task", "send_message"}:
         return "subagent"
     return "generic"
 
@@ -549,8 +591,13 @@ class SessionFact:
     input_length: int
     output_length: int
     token_count: int
-    source_file: str
-    source_line: int
+    token_input_tokens: int = 0
+    token_cached_input_tokens: int = 0
+    token_cache_write_input_tokens: int = 0
+    token_output_tokens: int = 0
+    token_reasoning_output_tokens: int = 0
+    source_file: str = ""
+    source_line: int = 0
     assistant_work_done: bool = False
     assistant_has_verification: bool = False
     assistant_has_subagent_status: bool = False
@@ -574,10 +621,21 @@ class SessionFact:
 
 
 def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> tuple[List[SessionFact], Dict[str, int]]:
-    stats = {"invalid_lines": 0, "filtered_older": 0, "filtered_files": 0}
+    stats = {
+        "invalid_lines": 0,
+        "filtered_older": 0,
+        "filtered_files": 0,
+        "raw_records": 0,
+        "fork_history_records_skipped": 0,
+        "duplicate_records_skipped": 0,
+    }
     facts: List[SessionFact] = []
     session_context: Dict[str, Dict[str, str]] = {}
-    for source_file, source_line, record in iter_jsonl_records(_filtered_session_paths(paths, cutoff, stats)):
+    session_started_at: Dict[str, datetime] = {}
+    seen_session_records: set[str] = set()
+    filtered_paths = sorted(_filtered_session_paths(paths, cutoff, stats), key=lambda item: str(item))
+    for source_file, source_line, record in iter_jsonl_records(filtered_paths):
+        stats["raw_records"] += 1
         source_key = str(source_file.resolve())
         if record is None:
             stats["invalid_lines"] += 1
@@ -598,6 +656,19 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
                 context["session_id"] = payload["id"]
             if isinstance(payload.get("cwd"), str):
                 context["cwd"] = payload["cwd"]
+            if ts is not None:
+                session_started_at[source_key] = ts
+
+        if event_type != "transcript_session_meta" and is_session_file(codex_home, source_file):
+            started_at = session_started_at.get(source_key)
+            if ts is not None and started_at is not None and ts < started_at:
+                stats["fork_history_records_skipped"] += 1
+                continue
+            fingerprint = _record_fingerprint(record)
+            if fingerprint in seen_session_records:
+                stats["duplicate_records_skipped"] += 1
+                continue
+            seen_session_records.add(fingerprint)
 
         if ts is not None and ts < cutoff:
             stats["filtered_older"] += 1
@@ -610,12 +681,21 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
         normalized_tool_name = normalize_tool_name(tool_name)
         tool_family = normalize_tool_family(normalized_tool_name)
         token_count = 0
+        token_usage = {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 0,
+        }
         input_length = 0
         output_length = 0
         event_reason = str(record.get("reason", ""))
 
         if event_type == "transcript_token_count":
             token_count = extract_token_count(payload)
+            token_usage = extract_token_usage(payload)
         elif event_type in {"transcript_function_call", "transcript_custom_tool_call"}:
             normalized_tool_name = normalize_tool_name(payload.get("name") or tool_name)
             tool_family = normalize_tool_family(normalized_tool_name)
@@ -718,6 +798,11 @@ def extract_facts(paths: Iterable[Path], codex_home: Path, cutoff: datetime) -> 
                 input_length=input_length,
                 output_length=output_length,
                 token_count=token_count,
+                token_input_tokens=token_usage["input_tokens"],
+                token_cached_input_tokens=token_usage["cached_input_tokens"],
+                token_cache_write_input_tokens=token_usage["cache_write_input_tokens"],
+                token_output_tokens=token_usage["output_tokens"],
+                token_reasoning_output_tokens=token_usage["reasoning_output_tokens"],
                 reason=event_reason,
                 normalized_tool_name=normalized_tool_name,
                 tool_family=tool_family,
@@ -767,6 +852,14 @@ def fact_to_dict(fact: SessionFact) -> Dict[str, object]:
         "input_length": fact.input_length,
         "output_length": fact.output_length,
         "token_count": fact.token_count,
+        "token_usage": {
+            "input_tokens": fact.token_input_tokens,
+            "cached_input_tokens": fact.token_cached_input_tokens,
+            "cache_write_input_tokens": fact.token_cache_write_input_tokens,
+            "output_tokens": fact.token_output_tokens,
+            "reasoning_output_tokens": fact.token_reasoning_output_tokens,
+            "total_tokens": fact.token_count,
+        },
         "source_file": fact.source_file,
         "source_line": fact.source_line,
         "assistant_work_done": fact.assistant_work_done,
