@@ -1,48 +1,28 @@
 ---
 name: merge-workflow
-description: Use for git merge, rebase, cherry-pick, pull, branch sync, PR merge, or merge conflict work; route conflict edits to conflict_resolver, require merge-safety intent lock where available, then validate and review with workflow_state ledger tracking.
+description: Use for git merge, rebase, cherry-pick, pull, branch sync, PR merge, or merge conflict work; route to merge-safety/merge guard when available, use conflict_resolver only for actual conflicts, and keep the main agent responsible for intent and acceptance.
 ---
 
 # Merge Workflow
 
-Use this skill for integration and conflict work. If a project has a merge-safety skill, use it before mutating refs or files.
+Use this as a routing card, not a step-by-step merge manual. Let project tools such as `$merge-safety` / `merge_guard.py` own deterministic gates, next actions, evidence recording, and readiness checks.
 
-## Ledger
+## Route
 
-Start with:
+- Use for `merge`, `rebase`, `cherry-pick`, `pull`, branch sync, PR merge, shared-branch promotion, or conflict resolution.
+- If the project has merge safety, resolve and fully load `../merge-safety/SKILL.md` before merge planning or mutation; use it as the source of truth for guard state and next action.
+- If there are conflict markers or unresolved merge files, delegate only those files to `conflict_resolver`.
+- Use `test_runner` for focused validation evidence.
+- Use `reviewer` only when the integration affects shared branches, broad scope, lineage, or risky behavior.
 
-```text
-workflow_state.state_version=1
-workflow_state.task_id=<stable task id>
-workflow_state.current_mode=split_workflow
-workflow_state.task_class=merge
-workflow_state.selected_skill=merge
-workflow_state.stage=planning
-workflow_state.required_roles=conflict_resolver,test_runner
-workflow_state.spawned_roles=
-workflow_state.waited_roles=
-workflow_state.closed_roles=
-workflow_state.role_assignments={}
-workflow_state.role_evidence={}
-workflow_state.verification_commands=
-workflow_state.reviewer_result=
-workflow_state.exception_reason=
-workflow_state.retained_subagents_reason=
-workflow_state.files_changed=
-workflow_state.final_status=
-```
+## Main-Agent Duties
 
-## Flow
+- Lock user intent before mutation: target/source refs, operation, allowed scope, forbidden changes, acceptance, and unknowns.
+- Stop and ask when product, compatibility, default, edge-case, or data-loss choices cannot be decided from source evidence.
+- Do not use ordinary `implementer` for conflict resolution.
+- Do not do business refactors, broad cleanup, whole-file ours/theirs, or fallback behavior changes unless explicitly authorized.
+- Treat guard output as authoritative. Follow its `next_action` instead of re-deriving the workflow from this skill.
 
-1. Lock merge intent: target/source refs, operation mode, allowed paths, forbidden changes, acceptance, and unknowns.
-2. Stop for user input when conflict resolution depends on product, compatibility, default, edge-case, or data-loss choices not discoverable from source.
-3. Use `conflict_resolver` for conflict files only. It cannot satisfy the `implementer` role.
-4. Use `test_runner` for focused merge/conflict validation.
-5. Use `reviewer` for read-only review when conflict scope or lineage risk warrants it.
-6. Update `workflow_state` after each spawn, wait, close, validation command, and review result.
+## Completion
 
-## Boundaries
-
-- Do not use ordinary `implementer` for unresolved merge conflicts.
-- Do not do business refactors while resolving conflicts.
-- Do not claim merge readiness until conflict markers, diff scope, lineage, validation, and review are checked.
+Claim merge readiness only after the guard/tooling says the result is ready, validation evidence is recorded, and any required review has no blocking findings. Report refs, validation, review outcome, remaining risk, and whether the merge intent was cleared or intentionally retained.

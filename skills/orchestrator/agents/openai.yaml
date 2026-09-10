@@ -1,4 +1,6 @@
 interface:
   display_name: "Orchestrator"
   short_description: "Delegate noisy Codex work to subagents."
-  default_prompt: "Use the orchestrator workflow to split heavy work into subagent tasks, collect concise findings, and verify acceptance."
+  default_prompt: "Use the orchestrator to select the phase owner, delegate only when it protects context or adds independent evidence, and verify the result."
+policy:
+  allow_implicit_invocation: true

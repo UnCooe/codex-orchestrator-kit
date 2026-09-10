@@ -1,4 +1,6 @@
 interface:
   display_name: "Predeploy Workflow"
   short_description: "Coordinate authorized predeploy or deploy verification with a deployer role."
-  default_prompt: "Use the predeploy workflow to confirm authorization, delegate deployer actions only when allowed, verify, and record workflow_state."
+  default_prompt: "Use the predeploy workflow to confirm authorization, delegate deployer actions only when allowed, verify, and report runtime evidence."
+policy:
+  allow_implicit_invocation: false

@@ -11,23 +11,37 @@ version: global-instructions-v1-workflow-core
 ## Workflow Routing
 
 - For non-trivial work, use `$orchestrator`.
+- When Codex has already selected an exact project-specific skill for the current phase, that skill may directly own the phase; use `$orchestrator` only to resolve ambiguity or coordinate cross-phase work.
 - Use `tiny_direct` only for simple commands, tiny reads, or small localized edits where delegation cost is higher than value.
-- Use `split_workflow` for non-trivial implementation, testing, review, merge conflict, predeploy, broad research, or risky design work.
+- Use `split_workflow` for non-trivial implementation, testing, review, merge conflict, predeploy, broad research, or risky design work; route there through `$orchestrator`.
 - Project-specific rules must come from the project `AGENTS.md`, project skills, or project profiles; do not encode project SOP in this global file.
 
 ## Delegation
 
+- Use outcome-based delegation. Named roles are tools for material value, not a fixed checklist.
 - Use generic subagent roles by capability, not by project name.
-- Keep implementation, test design, test writing, test running, review, conflict resolution, and deployment responsibilities isolated when work is non-trivial.
+- Keep one writer per named boundary; the main Agent counts as a writer.
+- Split testing and production writes only when file ownership is disjoint and explicit.
+- Use independent verification or review in proportion to risk, shared contracts, and user-visible impact.
 - Subagent outputs are evidence; the main Agent makes the final decision.
-- Close completed subagents, or keep them only with a clear retained reason.
+- Treat a subagent's runtime terminal/final state as completion; keep it active only with a clear retained reason.
 
 ## Safety Boundaries
 
-- Use `$codebase-research` for broad read-only architecture, dependency, endpoint, call-chain, or source-backed investigation.
-- Use `$merge-safety` and `$merge-workflow` for merge, rebase, cherry-pick, pull, branch sync, PR merge, or conflict work.
+- Route broad read-only architecture, dependency, endpoint, call-chain, or source-backed investigation through the orchestrator workflow.
+- Route merge, rebase, cherry-pick, pull, branch sync, PR merge, or conflict work through the orchestrator workflow so merge safety checks stay in force.
 - Server writes, deploys, restarts, pushes, releases, and environment mutations require explicit current-turn authorization.
+- When an active ops profile provides a controlled client and server wrapper, use that path for every managed-server write. Raw SSH is read-only for those hosts.
+- If the controlled path lacks a required write capability, stop and extend or repair that capability; do not substitute raw SSH, SCP, rsync, or an ad hoc remote shell write.
+- Treat clear natural-language approval of the currently displayed, frozen plan as the user's authorization. Bind it internally to the exact environment, target, host, service, action set, and current turn; do not ask the user to repeat a SHA or machine token.
 - If source evidence cannot decide a product, compatibility, default, edge-case, or data-loss choice, stop and ask.
+
+## Personal Branch And Shared-Environment Defaults
+
+- For follow-up work on the same requirement, continue on the already identified source feature/fix branch unless source evidence proves it is a new independent task.
+- Shared or integration branches represent reviewed integration state; do not use them for ordinary feature fixes or business patches.
+- Shared environments should run the shared branch state they represent so remote state, server checkout, and user-facing verification stay comparable.
+- Running a shared environment from another branch, tag, detached SHA, or ad hoc patch is an explicit exception and requires current-turn authorization for that exact action.
 
 ## Output
 

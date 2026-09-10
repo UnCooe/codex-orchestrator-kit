@@ -1,4 +1,6 @@
 interface:
   display_name: "Feature Workflow"
-  short_description: "Split non-trivial code work across implementation, tests, validation, and review."
-  default_prompt: "Use the feature workflow to create a workflow_state ledger, delegate implementation and independent testing/review roles, then verify completion."
+  short_description: "Implement non-trivial code changes with proportional testing and review."
+  default_prompt: "Use the feature workflow to establish branch discipline, choose delegation only where it adds value, and collect proportional validation and review evidence."
+policy:
+  allow_implicit_invocation: false

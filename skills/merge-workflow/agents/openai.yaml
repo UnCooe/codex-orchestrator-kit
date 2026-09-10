@@ -1,4 +1,6 @@
 interface:
   display_name: "Merge Workflow"
   short_description: "Resolve merge and conflict work with intent lock, conflict resolver, validation, and review."
-  default_prompt: "Use the merge workflow to lock merge intent, route conflicts to conflict_resolver, validate the result, and record workflow_state."
+  default_prompt: "Use the merge workflow to lock merge intent, route conflicts to conflict_resolver, validate the result, and report runtime evidence."
+policy:
+  allow_implicit_invocation: false

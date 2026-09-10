@@ -2,3 +2,5 @@ interface:
   display_name: "Review Workflow"
   short_description: "Run read-only review with reviewer and optional critic/researcher roles."
   default_prompt: "Use the review workflow to scope the review, delegate read-only reviewer work, and report severity-ranked findings."
+policy:
+  allow_implicit_invocation: false
