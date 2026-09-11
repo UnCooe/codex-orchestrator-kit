@@ -152,6 +152,24 @@ transcripts.
 See [the observability skill](skills/orchestrator-observability/SKILL.md) and
 [the review-kit boundary](docs/workflow-review-kit.md).
 
+## Workspace Lifecycle (Shadow Mode)
+
+`scripts/workspace_lifecycle.py` is the first, offline part of the workspace
+lifecycle contract. It records task ownership outside the project repository and
+classifies registered worktrees as clean, active, unowned-dirty, missing, or
+stale. It never switches branches, commits, or removes worktrees.
+
+Run it against any Git repository before enabling an integration hook:
+
+```bash
+python3 scripts/workspace_lifecycle.py audit --repo /path/to/repo \
+  --state-dir /tmp/workspace-ledger-shadow
+```
+
+The next integration phase will call the same contract at first write and task
+handoff. Until then this is a read-only audit and test surface, not a live Codex
+policy change.
+
 ## Repository Layout
 
 - `skills/`: seven managed workflow and observability skills
@@ -159,6 +177,7 @@ See [the observability skill](skills/orchestrator-observability/SKILL.md) and
 - `hooks/critical_action_gate.py`: the only managed runtime hook
 - `templates/`: canonical hook and global instruction templates
 - `scripts/verify_skill_install.py`: source/live parity verifier
+- `scripts/workspace_lifecycle.py`: task-to-worktree ownership and audit contract
 - `scripts/workflow_mvp_dry_run.py`: static distribution inventory
 - `tests/`: routing, safety, installer, merge, and observability tests
 
