@@ -36,7 +36,9 @@ See [the orchestrator skill](skills/orchestrator/SKILL.md) and
 
 ## Safety Boundary
 
-The kit registers one runtime hook: `hooks/critical_action_gate.py`.
+The kit registers two narrow runtime paths. `hooks/critical_action_gate.py` is
+the only blocking gate; `hooks/workspace_lifecycle_shadow.py` is a
+non-blocking lifecycle recorder.
 
 It is deliberately narrow. Ordinary shell commands remain on the fast path. The
 gate validates protected Git operations, pushes, SSH/server writes, `prodctl`, deploy,
@@ -162,26 +164,29 @@ stale. It never switches branches, commits, or removes worktrees.
 `scripts/workspace_lifecycle_adapter.py` is the matching read-only payload
 adapter. It recognizes the common lifecycle events and returns a shadow
 decision for missing ownership, cross-task reuse, and incomplete handoff. It
-does not claim state or enforce writes yet; a real-payload canary must validate
-task identity and worktree fields before this adapter is connected to a live
-hook.
+does not enforce writes. The shadow hook connects it after the real-payload
+canary: clean session/prompt starts record an `active` claim, clean `Stop`
+events record `ready`, and dirty or conflicting worktrees only emit a warning.
+The hook writes JSON ledger state outside the project and never blocks tools,
+commits files, switches branches, or removes worktrees.
 
-Run it against any Git repository before enabling an integration hook:
+Run the read-only contract against any Git repository:
 
 ```bash
 python3 scripts/workspace_lifecycle.py audit --repo /path/to/repo \
   --state-dir /tmp/workspace-ledger-shadow
 ```
 
-The next integration phase will call the same contract at first write and task
-handoff. Until then this is a read-only audit and test surface, not a live Codex
-policy change.
+The live integration remains shadow-only. It is a bookkeeping aid for task
+attribution, not a guarantee that every session will commit or close a
+worktree; when identity or `cwd` is absent, it does not guess.
 
 ## Repository Layout
 
 - `skills/`: seven managed workflow and observability skills
 - `agents/`: ten optional role templates
-- `hooks/critical_action_gate.py`: the only managed runtime hook
+- `hooks/critical_action_gate.py`: narrow blocking gate for high-risk commands
+- `hooks/workspace_lifecycle_shadow.py`: non-blocking task/worktree ledger hook
 - `templates/`: canonical hook and global instruction templates
 - `scripts/verify_skill_install.py`: source/live parity verifier
 - `scripts/workspace_lifecycle.py`: task-to-worktree ownership and audit contract

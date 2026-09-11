@@ -72,7 +72,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 actual = {path.name for path in root.iterdir() if path.is_file()}
-expected = {"critical_action_gate.py"}
+expected = {"critical_action_gate.py", "workspace_lifecycle_shadow.py"}
 if actual != expected:
     raise SystemExit(f"Router v3 hook runtime mismatch: {sorted(actual)}")
 PY
@@ -88,6 +88,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
     obj = json.load(stream)
 
 gate_entries = []
+shadow_entries = []
 commands = []
 for event, entries in obj.get("hooks", {}).items():
     for entry in entries:
@@ -97,6 +98,8 @@ for event, entries in obj.get("hooks", {}).items():
             commands.append(command)
             if "critical_action_gate.py" in command:
                 gate_entries.append((event, matcher, command))
+            if "workspace_lifecycle_shadow.py" in command:
+                shadow_entries.append((event, matcher, command))
 
 if len(gate_entries) != 1 or gate_entries[0][:2] != ("PreToolUse", "^(Bash|exec_command)$"):
     raise SystemExit(f"expected one command PreTool critical gate, got: {gate_entries}")
@@ -106,6 +109,11 @@ if any(matcher == "*" for _event, matcher, _command in gate_entries):
     raise SystemExit(f"managed hooks must not use wildcard matcher: {gate_entries}")
 if any(matcher == "^apply_patch$" for _event, matcher, _command in gate_entries):
     raise SystemExit(f"critical gate must not be registered on apply_patch: {gate_entries}")
+expected_shadow_events = {"SessionStart", "UserPromptSubmit", "Stop"}
+if {(event, matcher) for event, matcher, _command in shadow_entries} != {
+    (event, ".*") for event in expected_shadow_events
+}:
+    raise SystemExit(f"expected one non-blocking shadow hook per lifecycle event, got: {shadow_entries}")
 for legacy in (
     "orchestrator_user_prompt.py",
     "orchestrator_pre_tool_use.py",
@@ -242,8 +250,8 @@ import sys
 with open(sys.argv[1], "rb") as stream:
     obj = tomllib.load(stream)
 hooks = obj.get("hooks", {})
-if set(hooks) != {"PreToolUse"}:
-    raise SystemExit(f"config.toml mode should install only PreToolUse: {sorted(hooks)}")
+if set(hooks) != {"SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"}:
+    raise SystemExit(f"config.toml mode should install lifecycle hooks plus PreToolUse: {sorted(hooks)}")
 entries = hooks["PreToolUse"]
 by_matcher = {
     entry.get("matcher"): [
@@ -257,6 +265,13 @@ if set(by_matcher) != {"^(Bash|exec_command)$"}:
 commands = by_matcher["^(Bash|exec_command)$"]
 if len(commands) != 1 or "critical_action_gate.py" not in commands[0]:
     raise SystemExit(f"config.toml mode missing single critical gate: {by_matcher}")
+for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+    entries = hooks.get(event, [])
+    if len(entries) != 1 or entries[0].get("matcher") != ".*":
+        raise SystemExit(f"config.toml mode missing shadow matcher for {event}: {entries}")
+    shadow = [hook.get("command", "") for hook in entries[0].get("hooks", []) if "workspace_lifecycle_shadow.py" in hook.get("command", "")]
+    if len(shadow) != 1:
+        raise SystemExit(f"config.toml mode missing shadow hook for {event}: {entries}")
 PY
 "$ROOT/install.sh" --codex-home "$CONFIG_CODEX" --hook-mode config_toml --skills-mode codex --apply >/dev/null
 "$PYTHON_BIN" - "$CONFIG_CODEX/config.toml" <<'PY'
@@ -322,11 +337,15 @@ path = pathlib.Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 obj = tomllib.loads(text)
 user_prompt_entries = obj["hooks"]["UserPromptSubmit"]
-if len(user_prompt_entries) != 1:
-    raise SystemExit(f"expected one UserPromptSubmit block, got {len(user_prompt_entries)}")
-commands = [hook["command"] for hook in user_prompt_entries[0]["hooks"]]
+commands = [
+    hook["command"]
+    for entry in user_prompt_entries
+    for hook in entry.get("hooks", [])
+]
 if not any("aiserver_session_context.py" in command for command in commands):
     raise SystemExit("missing existing aiserver hook after config merge")
+if sum("workspace_lifecycle_shadow.py" in command for command in commands) != 1:
+    raise SystemExit(f"missing single shadow hook after config merge: {commands}")
 pretool_entries = obj["hooks"].get("PreToolUse", [])
 gate_entries = [
     entry
@@ -335,9 +354,13 @@ gate_entries = [
 ]
 if len(gate_entries) != 1 or gate_entries[0].get("matcher") != "^(Bash|exec_command)$":
     raise SystemExit(f"missing single command critical gate after config merge: {gate_entries}")
-for forbidden in ("PostToolUse", "Stop"):
-    if forbidden in obj["hooks"]:
-        raise SystemExit(f"unexpected legacy managed event after config merge: {forbidden}")
+for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+    entries = obj["hooks"].get(event, [])
+    shadow_entries = [entry for entry in entries if entry.get("matcher") == ".*"]
+    if len(shadow_entries) != 1:
+        raise SystemExit(f"missing shadow event after config merge: {event}: {entries}")
+    if sum("workspace_lifecycle_shadow.py" in hook.get("command", "") for hook in shadow_entries[0].get("hooks", [])) != 1:
+        raise SystemExit(f"missing single shadow hook after config merge: {event}: {entries}")
 PY
 
 grep -q 'C:/legacy/orchestrator_user_prompt.py' "$CODEX_HOME/hooks.json" && {
@@ -361,6 +384,11 @@ fi
 COUNT=$(grep -o 'critical_action_gate.py' "$CODEX_HOME/hooks.json" | wc -l | tr -d ' ')
 if [[ "$COUNT" != "1" ]]; then
   echo "Install is not idempotent: critical_action_gate.py appears $COUNT times" >&2
+  exit 1
+fi
+SHADOW_COUNT=$(grep -o 'workspace_lifecycle_shadow.py' "$CODEX_HOME/hooks.json" | wc -l | tr -d ' ')
+if [[ "$SHADOW_COUNT" != "3" ]]; then
+  echo "Install is not idempotent: workspace_lifecycle_shadow.py appears $SHADOW_COUNT times" >&2
   exit 1
 fi
 assert_router_v3_hooks_json "$CODEX_HOME/hooks.json"
@@ -820,13 +848,21 @@ if [[ -e "$UNINSTALL_CODEX/hooks/critical_action_gate.py" ]]; then
   echo "uninstall.sh left critical action gate installed" >&2
   exit 1
 fi
+if [[ -e "$UNINSTALL_CODEX/hooks/workspace_lifecycle_shadow.py" ]]; then
+  echo "uninstall.sh left workspace lifecycle shadow hook installed" >&2
+  exit 1
+fi
+if [[ -e "$UNINSTALL_CODEX/workspace-lifecycle/workspace_lifecycle.py" || -e "$UNINSTALL_CODEX/workspace-lifecycle/workspace_lifecycle_adapter.py" ]]; then
+  echo "uninstall.sh left workspace lifecycle library installed" >&2
+  exit 1
+fi
 if [[ -e "$UNINSTALL_CODEX/hooks/pilot_receipt_gate.py" ]]; then
   echo "uninstall.sh left pilot receipt gate installed" >&2
   exit 1
 fi
 grep -q 'pre-existing-user-prompt.py' "$UNINSTALL_CODEX/hooks.json"
 grep -q 'pre-existing-pre-tool.py' "$UNINSTALL_CODEX/hooks.json"
-if grep -q 'critical_action_gate.py\|pilot_receipt_gate.py' "$UNINSTALL_CODEX/hooks.json"; then
+if grep -q 'critical_action_gate.py\|workspace_lifecycle_shadow.py\|pilot_receipt_gate.py' "$UNINSTALL_CODEX/hooks.json"; then
   echo "uninstall.sh left managed hook entries in hooks.json" >&2
   exit 1
 fi

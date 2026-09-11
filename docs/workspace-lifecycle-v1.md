@@ -5,10 +5,12 @@ status alone cannot solve: a worktree may be dirty while a task is active, but
 the changes must have an owner and an explicit next state.
 
 `scripts/workspace_lifecycle.py` and
-`scripts/workspace_lifecycle_adapter.py` are intentionally advisory in this
-phase. They do not create branches, commit files, remove worktrees, or modify
-Codex configuration. They can be run against any Git repository and discover
-the repository root with Git rather than relying on a project directory name.
+`scripts/workspace_lifecycle_adapter.py` define an advisory local contract.
+The installed `hooks/workspace_lifecycle_shadow.py` may write only its JSON
+ledger state; none of these paths create branches, commit files, remove
+worktrees, or modify Git content. They can be run against any Git repository
+and discover the repository root with Git rather than relying on a project
+directory name.
 
 ## States
 
@@ -39,11 +41,13 @@ check before any hook integration.
 
 This is not a requirement that every worktree be permanently clean. The
 requirement is that no new task silently inherits another task's dirty files.
-The adapter is the first transition canary: it reads common lifecycle payload
-fields, reports whether a write would be attributed or blocked, and keeps
-`mutated: false` in both `shadow` and isolated `enforce` mode. Only after real
-payloads confirm task identity and worktree fields should a runtime hook call
-it; that future integration must still make claim and handoff actions explicit.
+The adapter reads common lifecycle payload fields, reports whether a write
+would be attributed or blocked, and keeps `mutated: false` in both `shadow`
+and isolated `enforce` mode. The shadow hook calls the same contract after the
+real payload canary: it claims clean worktrees at session/prompt start and
+records `ready` for clean `Stop` events. Dirty or conflicting states only
+produce additional context. Missing task identity or `cwd` is left
+unattributed rather than inferred from a directory name.
 
 ## Payload adapter
 
@@ -61,8 +65,8 @@ performing the write itself.
 The current external workflow-context log records the event, cwd, detected
 root, and branch, but not a stable task/thread id. The adapter can optionally
 observe `CODEX_THREAD_ID` or `CODEX_SESSION_ID` from the hook process and marks
-that source as `environment`; it must still be validated against a real
-runtime payload before becoming an authorization input. Without either an
+that source as `environment`; the real canary confirmed that the payload's
+`session_id` is the stable source in the current CLI. Without either an
 explicit payload id or an environment id it returns `unknown_task`. This is
 an intentional fail-closed result, not a reason to infer ownership from the
 directory name.

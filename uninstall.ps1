@@ -18,6 +18,7 @@ foreach ($scriptName in @(
     'workflow_profile.py'
     'first_write_gate.py'
     'critical_action_gate.py'
+    'workspace_lifecycle_shadow.py'
     'pilot_receipt_gate.py'
 )) {
     $null = $managedHookScripts.Add($scriptName)
@@ -139,7 +140,7 @@ function Remove-ConfigTomlManagedHooks {
 
     $managedScriptPattern = '(?i)(?<![A-Za-z0-9_.-])(?:orchestrator_user_prompt|orchestrator_pre_tool_use|' +
         'orchestrator_post_tool_use|orchestrator_stop|orchestrator_observability|workflow_profile|' +
-        'first_write_gate|critical_action_gate|pilot_receipt_gate)\.py(?![A-Za-z0-9_.-])'
+        'first_write_gate|critical_action_gate|workspace_lifecycle_shadow|pilot_receipt_gate)\.py(?![A-Za-z0-9_.-])'
     $eventHeaderPattern = '^\[\[hooks\.([A-Za-z0-9_]+)\]\]\s*$'
     $subhookHeaderPattern = '^\[\[hooks\.([A-Za-z0-9_]+)\.hooks\]\]\s*$'
 
@@ -285,6 +286,7 @@ if (-not $SkillsOnly.IsPresent) {
 
 if (-not $SkillsOnly.IsPresent) {
     Assert-ExactPathNotReparse -Path (Join-Path $CodexHome 'hooks')
+    Assert-NoReparsePoint -Path (Join-Path $CodexHome 'workspace-lifecycle')
     if ($ResolvedHookMode -eq 'hooks_json') {
         $hooksPath = Join-Path $CodexHome 'hooks.json'
         Assert-NoReparsePoint -Path $hooksPath

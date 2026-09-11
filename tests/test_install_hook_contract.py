@@ -24,6 +24,7 @@ KIT_MANAGED_HOOK_SCRIPTS = (
     "workflow_profile.py",
     "first_write_gate.py",
     "critical_action_gate.py",
+    "workspace_lifecycle_shadow.py",
     "pilot_receipt_gate.py",
 )
 PROJECT_HOOK_SCRIPT = "orchestrator_project_policy.py"
@@ -54,6 +55,8 @@ def _hook_script_names(entry: dict[str, object]) -> list[str]:
         command = str(hook.get("command", ""))
         if "critical_action_gate.py" in command:
             names.append("critical_action_gate.py")
+        if "workspace_lifecycle_shadow.py" in command:
+            names.append("workspace_lifecycle_shadow.py")
         if "pilot_receipt_gate.py" in command:
             names.append("pilot_receipt_gate.py")
     return names
@@ -146,6 +149,11 @@ class InstallHookContractTests(unittest.TestCase):
         rendered = json.dumps(template)
         self.assertEqual(rendered.count("critical_action_gate.py"), 1)
         self.assertNotIn("pilot_receipt_gate.py", rendered)
+        for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+            entries = template["hooks"].get(event)
+            self.assertIsInstance(entries, list)
+            self.assertEqual(_hook_script_names(entries[0]), ["workspace_lifecycle_shadow.py"])
+            self.assertEqual(entries[0].get("matcher"), ".*")
 
         for forbidden in (
             "orchestrator_pre_tool_use.py",
@@ -166,6 +174,10 @@ class InstallHookContractTests(unittest.TestCase):
         self.assertNotIn('matcher = "^apply_patch$"', text)
         _assert_default_critical_gate_only(self, parsed["hooks"]["PreToolUse"])
         self.assertEqual(text.count("critical_action_gate.py"), 1)
+        for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+            self.assertIn(f"[[hooks.{event}]]", text)
+            self.assertIn(f"[[hooks.{event}.hooks]]", text)
+        self.assertEqual(text.count("workspace_lifecycle_shadow.py"), 3)
         self.assertNotIn("pilot_receipt_gate.py", text)
         for forbidden in (
             "orchestrator_pre_tool_use.py",
@@ -264,7 +276,7 @@ class InstallHookContractTests(unittest.TestCase):
                 self.assertIn("critical_action_gate.py", assignment.group(1))
                 self.assertNotIn("pilot_receipt_gate.py", assignment.group(1))
                 main = ps_text[ps_text.index("$skillTargets = @(") :]
-                self.assertIn("$managedPreToolScripts", main)
+                self.assertIn("$managedRuntimeScripts", main)
                 self.assertNotIn("orchestrator_pre_tool_use.py", main)
 
     def test_managed_hook_detection_uses_exact_kit_owned_names(self) -> None:
@@ -296,9 +308,12 @@ class InstallHookContractTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
                 installed = surface.read_text(encoding="utf-8")
                 self.assertIn(PROJECT_HOOK_SCRIPT, installed)
-                for legacy in KIT_MANAGED_HOOK_SCRIPTS[:-2]:
+                for legacy in KIT_MANAGED_HOOK_SCRIPTS:
+                    if legacy in {"critical_action_gate.py", "workspace_lifecycle_shadow.py"}:
+                        continue
                     self.assertNotIn(legacy, installed)
                 self.assertEqual(installed.count("critical_action_gate.py"), 1)
+                self.assertEqual(installed.count("workspace_lifecycle_shadow.py"), 3)
                 self.assertNotIn("pilot_receipt_gate.py", installed)
 
     def test_bash_uninstall_preserves_project_hook_on_both_hook_surfaces(self) -> None:
@@ -322,7 +337,7 @@ class InstallHookContractTests(unittest.TestCase):
                 for managed in KIT_MANAGED_HOOK_SCRIPTS:
                     self.assertNotIn(managed, installed)
 
-    def test_bash_full_install_copies_only_critical_hook_runtime(self) -> None:
+    def test_bash_full_install_copies_critical_gate_and_shadow_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
 
@@ -334,7 +349,13 @@ class InstallHookContractTests(unittest.TestCase):
                 for path in (root / "codex" / "hooks").glob("*.py")
                 if path.is_file()
             }
-            self.assertEqual(installed_hooks, {"critical_action_gate.py"})
+            self.assertEqual(installed_hooks, {"critical_action_gate.py", "workspace_lifecycle_shadow.py"})
+            installed_library = {
+                path.name
+                for path in (root / "codex" / "workspace-lifecycle").glob("*.py")
+                if path.is_file()
+            }
+            self.assertEqual(installed_library, {"workspace_lifecycle.py", "workspace_lifecycle_adapter.py"})
 
     def test_bash_skill_verification_failure_happens_before_runtime_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -541,6 +562,24 @@ class InstallHookContractTests(unittest.TestCase):
                 self.assertTrue(protected_link.is_symlink(), proc.stdout + proc.stderr)
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
+    def test_bash_full_install_fails_closed_on_workspace_library_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex"
+            codex_home.mkdir(parents=True)
+            external = root / "external-target"
+            external.mkdir()
+            (external / "sentinel.txt").write_text("external sentinel\n", encoding="utf-8")
+            protected_link = codex_home / "workspace-lifecycle"
+            protected_link.symlink_to(external, target_is_directory=True)
+            before = _file_tree_snapshot(external)
+
+            proc = _run_bash("install.sh", *_install_args(root, "hooks_json"))
+
+            self.assertEqual(_file_tree_snapshot(external), before, proc.stdout + proc.stderr)
+            self.assertTrue(protected_link.is_symlink(), proc.stdout + proc.stderr)
+            self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
     def test_bash_full_install_and_uninstall_allow_unmanaged_hook_symlink_siblings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -607,10 +646,19 @@ timeout = 10
                     for entry in parsed["hooks"]["UserPromptSubmit"]
                     for hook in entry["hooks"]
                 ]
-                self.assertEqual(
-                    user_prompt_commands,
-                    ["python3 /opt/project/hooks/aiserver_session_context.py"],
-                )
+                if script == "install.sh":
+                    self.assertEqual(
+                        user_prompt_commands,
+                        [
+                            "python3 /opt/project/hooks/aiserver_session_context.py",
+                            next(command for command in user_prompt_commands if "workspace_lifecycle_shadow.py" in command),
+                        ],
+                    )
+                else:
+                    self.assertEqual(
+                        user_prompt_commands,
+                        ["python3 /opt/project/hooks/aiserver_session_context.py"],
+                    )
 
     def test_bash_full_uninstall_fails_closed_on_hook_and_surface_symlinks(self) -> None:
         scenarios = (

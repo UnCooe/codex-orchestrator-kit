@@ -14,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
 $managedPreToolScripts = @('critical_action_gate.py')
+$managedRuntimeScripts = @('critical_action_gate.py', 'workspace_lifecycle_shadow.py')
 $managedHookScripts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($scriptName in @(
     'orchestrator_user_prompt.py'
@@ -23,6 +24,7 @@ foreach ($scriptName in @(
     'orchestrator_observability.py'
     'workflow_profile.py'
     'first_write_gate.py'
+    'workspace_lifecycle_shadow.py'
     'pilot_receipt_gate.py'
     $managedPreToolScripts
 )) {
@@ -572,7 +574,7 @@ function Merge-ConfigTomlHooks {
     $eventHeaderRegex = '^\[\[hooks\.([A-Za-z0-9_]+)\]\]$'
     $managedHookScriptRegex = '(?i)(?<![A-Za-z0-9_.-])(?:orchestrator_user_prompt|orchestrator_' +
         'pre_tool_use|orchestrator_post_tool_use|orchestrator_stop|orchestrator_observability|' +
-        'workflow_profile|first_write_gate|critical_action_gate|pilot_receipt_gate)\.py(?![A-Za-z0-9_.-])'
+        'workflow_profile|first_write_gate|critical_action_gate|workspace_lifecycle_shadow|pilot_receipt_gate)\.py(?![A-Za-z0-9_.-])'
 
     function Split-HookRegion {
         param([string]$Text)
@@ -823,11 +825,19 @@ $skillTargets = @(
 )
 $planTargets = @($skillTargets)
 if (-not $SkillsOnly.IsPresent) {
-    foreach ($scriptName in $managedPreToolScripts) {
+    foreach ($scriptName in $managedRuntimeScripts) {
         $planTargets += @(
         @{
             Source = Join-Path (Join-Path $scriptRoot 'hooks') $scriptName
             Destination = Join-Path (Join-Path $CodexHome 'hooks') $scriptName
+        }
+        )
+    }
+    foreach ($libraryName in @('workspace_lifecycle.py', 'workspace_lifecycle_adapter.py')) {
+        $planTargets += @(
+        @{
+            Source = Join-Path (Join-Path $scriptRoot 'scripts') $libraryName
+            Destination = Join-Path (Join-Path $CodexHome 'workspace-lifecycle') $libraryName
         }
         )
     }
@@ -880,7 +890,14 @@ Invoke-SkillInstallVerifier -PythonCommand $PythonCommand `
 
 if (-not $InstallDryRun) { Assert-ExactPathNotReparse -Path (Join-Path $CodexHome 'hooks') }
 
-foreach ($scriptName in $managedPreToolScripts) {
+if (-not $InstallDryRun) { Assert-NoReparsePoint -Path (Join-Path $CodexHome 'workspace-lifecycle') }
+foreach ($libraryName in @('workspace_lifecycle.py', 'workspace_lifecycle_adapter.py')) {
+    Stage-Files `
+        -Source (Join-Path (Join-Path $scriptRoot 'scripts') $libraryName) `
+        -Destination (Join-Path (Join-Path $CodexHome 'workspace-lifecycle') $libraryName)
+}
+
+foreach ($scriptName in $managedRuntimeScripts) {
     Stage-Files `
         -Source (Join-Path (Join-Path $scriptRoot 'hooks') $scriptName) `
         -Destination (Join-Path (Join-Path $CodexHome 'hooks') $scriptName)

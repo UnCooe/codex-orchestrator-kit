@@ -183,6 +183,7 @@ managed_scripts = {
     "workflow_profile.py",
     "first_write_gate.py",
     "critical_action_gate.py",
+    "workspace_lifecycle_shadow.py",
     "pilot_receipt_gate.py",
 }
 token_re = re.compile(r'(?:"([^"]+)"|\'([^\']+)\'|(\S+))')
@@ -238,7 +239,7 @@ text = pattern.sub("", text)
 managed = re.compile(
     r"(?i)(?<![A-Za-z0-9_.-])(?:orchestrator_user_prompt|orchestrator_pre_tool_use|"
     r"orchestrator_post_tool_use|orchestrator_stop|orchestrator_observability|workflow_profile|"
-    r"first_write_gate|critical_action_gate|pilot_receipt_gate)"
+    r"first_write_gate|critical_action_gate|workspace_lifecycle_shadow|pilot_receipt_gate)"
     r"\.py(?![A-Za-z0-9_.-])"
 )
 event_header = re.compile(r"^\[\[hooks\.([A-Za-z0-9_]+)\]\]\s*$")
@@ -308,6 +309,7 @@ fi
 
 if [[ "$SKILLS_ONLY" != "1" ]]; then
   fail_if_symlink "$CODEX_TARGET/hooks"
+  fail_if_tree_contains_symlink "$CODEX_TARGET/workspace-lifecycle"
   if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
     HOOK_SURFACE="$CODEX_TARGET/hooks.json"
     fail_if_symlink "$HOOK_SURFACE"
@@ -339,7 +341,10 @@ if [[ "$SKILLS_ONLY" != "1" ]]; then
   "$CODEX_TARGET/hooks/workflow_profile.py"
   "$CODEX_TARGET/hooks/first_write_gate.py"
   "$CODEX_TARGET/hooks/critical_action_gate.py"
+  "$CODEX_TARGET/hooks/workspace_lifecycle_shadow.py"
   "$CODEX_TARGET/hooks/pilot_receipt_gate.py"
+  "$CODEX_TARGET/workspace-lifecycle/workspace_lifecycle.py"
+  "$CODEX_TARGET/workspace-lifecycle/workspace_lifecycle_adapter.py"
   "$CODEX_TARGET/agents/critic.toml"
   "$CODEX_TARGET/agents/implementer.toml"
   "$CODEX_TARGET/agents/researcher.toml"

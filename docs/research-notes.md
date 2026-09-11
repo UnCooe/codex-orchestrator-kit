@@ -35,6 +35,6 @@ Codex Desktop portability is handled as a file-based kit:
 
 - skills install under the selected Codex or Agents skill root;
 - optional role templates install under the selected Codex home;
-- exactly one kit runtime hook, `critical_action_gate.py`, is registered;
-- observability stays offline and does not add lifecycle hooks;
+- one kit hook blocks only high-risk commands, `critical_action_gate.py`;
+- one additional shadow hook records workspace lifecycle state without blocking;
 - plugin packaging remains deferred until the portable installer contract is stable.

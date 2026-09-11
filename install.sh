@@ -14,6 +14,14 @@ SKILLS_MODE_EXPLICIT=0
 MANAGED_PRETOOL_SCRIPTS=(
   critical_action_gate.py
 )
+MANAGED_HOOK_SCRIPTS=(
+  critical_action_gate.py
+  workspace_lifecycle_shadow.py
+)
+MANAGED_WORKSPACE_LIBRARY_FILES=(
+  workspace_lifecycle.py
+  workspace_lifecycle_adapter.py
+)
 MANAGED_SKILLS=(
   orchestrator
   orchestrator-observability
@@ -208,8 +216,11 @@ for skill in "${MANAGED_SKILLS[@]}"; do
   echo "  files: $SCRIPT_DIR/skills/$skill -> $SKILLS_TARGET_ROOT/skills/$skill"
 done
 if [[ "$SKILLS_ONLY" != "1" ]]; then
-  for script_name in "${MANAGED_PRETOOL_SCRIPTS[@]}"; do
+  for script_name in "${MANAGED_HOOK_SCRIPTS[@]}"; do
     echo "  files: $SCRIPT_DIR/hooks/$script_name -> $CODEX_TARGET/hooks/$script_name"
+  done
+  for library_name in "${MANAGED_WORKSPACE_LIBRARY_FILES[@]}"; do
+    echo "  files: $SCRIPT_DIR/scripts/$library_name -> $CODEX_TARGET/workspace-lifecycle/$library_name"
   done
   for plan_entry in \
     "$SCRIPT_DIR/agents -> $CODEX_TARGET/agents"; do
@@ -312,6 +323,16 @@ copy_file() {
   echo "installed: $dst"
 }
 
+if [[ "$DRY_RUN" != "1" && "$SKILLS_ONLY" != "1" ]]; then
+  fail_if_symlink "$CODEX_TARGET/hooks"
+  if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
+    fail_if_symlink "$CODEX_TARGET/hooks.json"
+  else
+    fail_if_symlink "$CODEX_TARGET/config.toml"
+  fi
+  fail_if_tree_contains_symlink "$CODEX_TARGET/workspace-lifecycle"
+fi
+
 prune_stale_skill_files() {
   local src_dir="$1"
   local dst_dir="$2"
@@ -377,6 +398,7 @@ MANAGED_HOOK_SCRIPTS = {
     "workflow_profile.py",
     "first_write_gate.py",
     "critical_action_gate.py",
+    "workspace_lifecycle_shadow.py",
     "pilot_receipt_gate.py",
 }
 
@@ -509,7 +531,7 @@ ANY_HEADER_RE = re.compile(r"^\[")
 MANAGED_HOOK_SCRIPT_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_.-])(?:orchestrator_user_prompt|orchestrator_"
     r"pre_tool_use|orchestrator_post_tool_use|orchestrator_stop|orchestrator_observability|"
-    r"workflow_profile|first_write_gate|critical_action_gate|pilot_receipt_gate)"
+    r"workflow_profile|first_write_gate|critical_action_gate|workspace_lifecycle_shadow|pilot_receipt_gate)"
     r"\.py(?![A-Za-z0-9_.-])"
 )
 
@@ -700,16 +722,13 @@ verify_skill_install() {
 
 verify_skill_install
 
-if [[ "$DRY_RUN" != "1" ]]; then
-  fail_if_symlink "$CODEX_TARGET/hooks"
-  if [[ "$RESOLVED_HOOK_MODE" == "hooks_json" ]]; then
-    fail_if_symlink "$CODEX_TARGET/hooks.json"
-  else
-    fail_if_symlink "$CODEX_TARGET/config.toml"
-  fi
-fi
+for library_name in "${MANAGED_WORKSPACE_LIBRARY_FILES[@]}"; do
+  copy_file \
+    "$SCRIPT_DIR/scripts/$library_name" \
+    "$CODEX_TARGET/workspace-lifecycle/$library_name"
+done
 
-for script_name in "${MANAGED_PRETOOL_SCRIPTS[@]}"; do
+for script_name in "${MANAGED_HOOK_SCRIPTS[@]}"; do
   copy_file \
     "$SCRIPT_DIR/hooks/$script_name" \
     "$CODEX_TARGET/hooks/$script_name"
