@@ -38,6 +38,15 @@ def payload(repo: Path, event: str, task: str = "task-1", **extra: object) -> di
 
 
 class WorkspaceLifecycleAdapterTests(unittest.TestCase):
+    def test_verified_hook_fixture_uses_session_id_and_cwd_for_all_events(self) -> None:
+        fixture = ROOT / "tests" / "fixtures" / "workspace-lifecycle-hook-payloads.jsonl"
+        records = [json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual([item["hook_event_name"] for item in records], ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"])
+        self.assertEqual({item["session_id"] for item in records}, {"canary-session-001"})
+        self.assertEqual({item["cwd"] for item in records}, {"/tmp/workspace-lifecycle-canary/repo"})
+        self.assertEqual(adapter.identity_source_from_payload(records[0], environ={}), "payload")
+        self.assertTrue(adapter.is_write_candidate(records[2]) is False)
+
     def test_task_id_uses_explicit_fields_or_nested_session_meta_only(self) -> None:
         self.assertEqual(adapter.task_id_from_payload({"thread_id": "thread-1"}), "thread-1")
         self.assertEqual(adapter.task_id_from_payload({"session_meta": {"payload": {"id": "session-1"}}}, environ={}), "session-1")
