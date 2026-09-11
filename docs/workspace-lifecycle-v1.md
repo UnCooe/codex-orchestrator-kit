@@ -4,9 +4,10 @@ The workflow kit now has a small, local contract for the problem that Git
 status alone cannot solve: a worktree may be dirty while a task is active, but
 the changes must have an owner and an explicit next state.
 
-`scripts/workspace_lifecycle.py` is intentionally advisory in this first
-phase. It does not create branches, commit files, remove worktrees, or modify
-Codex configuration. It can be run against any Git repository and discovers
+`scripts/workspace_lifecycle.py` and
+`scripts/workspace_lifecycle_adapter.py` are intentionally advisory in this
+phase. They do not create branches, commit files, remove worktrees, or modify
+Codex configuration. They can be run against any Git repository and discover
 the repository root with Git rather than relying on a project directory name.
 
 ## States
@@ -38,5 +39,30 @@ check before any hook integration.
 
 This is not a requirement that every worktree be permanently clean. The
 requirement is that no new task silently inherits another task's dirty files.
-The next phase can add a first-write and task-transition adapter after the
-contract has been exercised against real repositories.
+The adapter is the first transition canary: it reads common lifecycle payload
+fields, reports whether a write would be attributed or blocked, and keeps
+`mutated: false` in both `shadow` and isolated `enforce` mode. Only after real
+payloads confirm task identity and worktree fields should a runtime hook call
+it; that future integration must still make claim and handoff actions explicit.
+
+## Payload adapter
+
+```sh
+printf '%s\n' '{"hook_event_name":"SessionStart","cwd":"/path/to/worktree","thread_id":"TASK"}' \
+  | python3 scripts/workspace_lifecycle_adapter.py --mode shadow
+```
+
+The adapter accepts `SessionStart`, `UserPromptSubmit`, `PreToolUse` and
+`Stop`. Missing task ids or worktree paths produce a warning rather than a
+guessed owner. `shadow` is the only live-safe mode; `enforce` is for an
+isolated canary and reports a deny decision for an unowned dirty write without
+performing the write itself.
+
+The current external workflow-context log records the event, cwd, detected
+root, and branch, but not a stable task/thread id. The adapter can optionally
+observe `CODEX_THREAD_ID` or `CODEX_SESSION_ID` from the hook process and marks
+that source as `environment`; it must still be validated against a real
+runtime payload before becoming an authorization input. Without either an
+explicit payload id or an environment id it returns `unknown_task`. This is
+an intentional fail-closed result, not a reason to infer ownership from the
+directory name.

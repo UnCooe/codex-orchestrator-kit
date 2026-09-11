@@ -159,6 +159,13 @@ lifecycle contract. It records task ownership outside the project repository and
 classifies registered worktrees as clean, active, unowned-dirty, missing, or
 stale. It never switches branches, commits, or removes worktrees.
 
+`scripts/workspace_lifecycle_adapter.py` is the matching read-only payload
+adapter. It recognizes the common lifecycle events and returns a shadow
+decision for missing ownership, cross-task reuse, and incomplete handoff. It
+does not claim state or enforce writes yet; a real-payload canary must validate
+task identity and worktree fields before this adapter is connected to a live
+hook.
+
 Run it against any Git repository before enabling an integration hook:
 
 ```bash
@@ -178,6 +185,7 @@ policy change.
 - `templates/`: canonical hook and global instruction templates
 - `scripts/verify_skill_install.py`: source/live parity verifier
 - `scripts/workspace_lifecycle.py`: task-to-worktree ownership and audit contract
+- `scripts/workspace_lifecycle_adapter.py`: read-only lifecycle payload adapter
 - `scripts/workflow_mvp_dry_run.py`: static distribution inventory
 - `tests/`: routing, safety, installer, merge, and observability tests
 
