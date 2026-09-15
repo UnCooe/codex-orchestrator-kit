@@ -431,6 +431,34 @@ class CriticalActionGateContractTests(unittest.TestCase):
             self.assertEqual(allowed.get("decision"), "allow")
             self.assertTrue(allowed.get("silent"), allowed)
 
+    def test_protected_push_accepts_plan_approval_with_common_typo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            _init_git_repo(root, branch="sync-work")
+            transcript = _write_transcript(root, "可以，推倒远端 master")
+            _write_merge_safety_state(
+                root,
+                operation="push",
+                target_ref="master",
+                source_ref="HEAD",
+                precheck_ok=True,
+                validation_ok=True,
+                review_ok=True,
+                lineage_ok=True,
+                postcheck_ok=True,
+            )
+
+            allowed = _run_gate(
+                _payload(
+                    "git push origin HEAD:master",
+                    cwd=root,
+                    transcript_path=str(transcript),
+                )
+            )
+
+            self.assertEqual(allowed.get("decision"), "allow")
+            self.assertTrue(allowed.get("silent"), allowed)
+
     def test_protected_push_rejects_missing_or_mismatched_intent_even_with_complete_evidence(self) -> None:
         complete_evidence = {
             "validation_ok": True,
@@ -2304,6 +2332,50 @@ class CriticalActionGateContractTests(unittest.TestCase):
             restart_allowed = _run_gate(_payload(restart, cwd=root, transcript_path=str(restart_auth)))
             self.assertEqual(restart_allowed.get("decision"), "allow")
             self.assertTrue(restart_allowed.get("silent"), restart_allowed)
+
+    def test_prodctl_prod_exact_commit_deploy_requires_detached_exception_language(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ref = "89a038be0cdf4525f9ea651c326f67470b365352"
+            command = f"./prodctl deploy --host app-prod-1 --ref {ref} --approval-token internal-token"
+
+            ordinary_auth = _write_transcript(root, "deploy the current branch to prod using prodctl")
+            ordinary = _run_gate(_payload(command, cwd=root, transcript_path=str(ordinary_auth)))
+            self.assertEqual(ordinary.get("decision"), "block")
+            self.assertIn("detached", str(ordinary.get("reason", "")).lower())
+
+            assistant_plan = (
+                f"Plan: deploy commit {ref} to prod host app-prod-1 using prodctl. "
+                "This will checkout-only and will not restart."
+            )
+            vague_auth = _write_transcript(root, "可以，按照规划推进吧", assistant_plan)
+            vague = _run_gate(_payload(command, cwd=root, transcript_path=str(vague_auth)))
+            self.assertEqual(vague.get("decision"), "block")
+            self.assertIn("detached", str(vague.get("reason", "")).lower())
+
+            explicit_auth = _write_transcript(
+                root,
+                f"允许生产 app-prod-1 使用 emergency detached commit 部署 ref={ref}，不走 master。",
+            )
+            explicit = _run_gate(_payload(command, cwd=root, transcript_path=str(explicit_auth)))
+            self.assertEqual(explicit.get("decision"), "allow")
+            self.assertTrue(explicit.get("silent"), explicit)
+
+    def test_conditional_user_text_is_not_current_turn_server_write_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ref = "89a038be0cdf4525f9ea651c326f67470b365352"
+            command = f"./prodctl deploy --host app-prod-1 --ref {ref} --approval-token internal-token"
+            transcript = _write_transcript(
+                root,
+                "如果确认其他的也要部署，可以先不重启服务。现在 master 已经同步了修改，对吧？",
+                f"Plan: deploy commit {ref} to prod host app-prod-1 using prodctl without restart.",
+            )
+
+            result = _run_gate(_payload(command, cwd=root, transcript_path=str(transcript)))
+
+            self.assertEqual(result.get("decision"), "block")
+            self.assertIn("current-turn", str(result.get("reason", "")).lower())
 
     def test_prodctl_prod_deploy_accepts_chinese_environment_action_aliases_without_user_plan_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

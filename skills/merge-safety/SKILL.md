@@ -47,6 +47,20 @@ Use this for a shared/protected target only when the user intends an exact commi
 - Run `check-post` before pushing. Do not reinitialize the intent after the cherry-pick result exists.
 - Do not use `--allow-patch-equivalent` for arbitrary manual patches or broad branch claims; it is for declared exact cherry-picked commits.
 
+## Protected Branch Sync
+
+Use this when the goal is to make a protected shared branch contain an already checked result without changing any running environment, for example after a feature branch or emergency commit has already been validated and the user asks to sync `master` or `main`.
+
+This is a boundary, not a fixed runbook. The agent may use a clean integration worktree, fast-forward, merge commit, or narrow cherry-pick as appropriate, but the final write must be one explicit protected push and must not deploy, restart, force-push, or mutate servers.
+
+After the result commit exists and validation/review evidence is available, prepare the push state:
+
+```bash
+python scripts/merge_guard.py prepare-protected-sync --cwd /path/to/repo --target-ref master --source-ref HEAD --validated-ref <validated-ref> --test "<validation>" --review "<review>"
+```
+
+Then run only the returned single-ref `git push` command after current-turn user approval. If `prepare-protected-sync` fails, follow its `next_action` and do not push.
+
 ## Agent Boundaries
 
 - Ask the user when source evidence cannot decide product, compatibility, default, edge-case, data-loss, target/source ref, or hotfix authorization choices.

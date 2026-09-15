@@ -34,6 +34,7 @@ version: global-instructions-v1-workflow-core
 - When an active ops profile provides a controlled client and server wrapper, use that path for every managed-server write. Raw SSH is read-only for those hosts.
 - If the controlled path lacks a required write capability, stop and extend or repair that capability; do not substitute raw SSH, SCP, rsync, or an ad hoc remote shell write.
 - Treat clear natural-language approval of the currently displayed, frozen plan as the user's authorization. Bind it internally to the exact environment, target, host, service, action set, and current turn; do not ask the user to repeat a SHA or machine token.
+- If a user's approval depends on a premise that is later proven false, such as assuming `master` already contains a fix, the approval no longer applies; stop and ask with the corrected fact.
 - If source evidence cannot decide a product, compatibility, default, edge-case, or data-loss choice, stop and ask.
 
 ## Personal Branch And Shared-Environment Defaults
@@ -41,7 +42,7 @@ version: global-instructions-v1-workflow-core
 - For follow-up work on the same requirement, continue on the already identified source feature/fix branch unless source evidence proves it is a new independent task.
 - Shared or integration branches represent reviewed integration state; do not use them for ordinary feature fixes or business patches.
 - Shared environments should run the shared branch state they represent so remote state, server checkout, and user-facing verification stay comparable.
-- Running a shared environment from another branch, tag, detached SHA, or ad hoc patch is an explicit exception and requires current-turn authorization for that exact action.
+- Running a shared environment from another branch, tag, detached SHA, or ad hoc patch is an explicit exception and requires current-turn authorization for that exact action. A checkout-only deploy is still a production mutation because it changes what the next restart will run.
 
 ## Output
 

@@ -23,7 +23,7 @@ DEFAULT_ENVIRONMENT_ALIASES = {
     "test": ("test", "testing", "测试"),
 }
 DEFAULT_ACTION_ALIASES = {
-    "push": ("push", "推送", "推上去", "推到"),
+    "push": ("push", "推送", "推上去", "推到", "推倒"),
     "deploy": ("deploy", "部署", "发布", "上线"),
     "restart": ("restart", "重启", "重启服务"),
     "rollback": ("rollback", "回滚"),
@@ -451,6 +451,8 @@ def _is_positive_plan_approval(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", text.strip().lower())
     if not normalized:
         return False
+    if re.search(r"(?:^|[\s，。；;,.])(?:if\b|如果|若|假如|倘若)", normalized):
+        return False
     if any(marker in normalized for marker in ("?", "？", "是否", "能否", "可否", "吗", "如何", "怎么")):
         return False
     negative = (
@@ -481,7 +483,7 @@ def _is_positive_plan_approval(text: str) -> bool:
         return True
     if re.search(r"(?:可以|确认|好的?|没问题|继续).{0,16}(?:按|执行|继续|重启|部署|发布|回滚)", normalized):
         return True
-    if re.search(r"(?:推送|推上去|推到|推|部署|发布|重启|执行|继续)(?:吧|了)?$", normalized):
+    if re.search(r"(?:推送|推上去|推到|推倒|推|部署|发布|重启|执行|继续)(?:吧|了)?$", normalized):
         return True
     return normalized.strip(" ，。！？,.!?") in {"可以", "确认", "好的", "好", "没问题", "继续", "执行"}
 
@@ -518,7 +520,7 @@ def _explicit_plan_refs(text: str) -> list[str]:
         rf"(?:commit|sha|提交|版本)\s*(?:为|是|:|：|=)?\s*{ref_token}",
         rf"(?:from|source)\s+(?:branch|ref)\s+{ref_token}",
         rf"(?:deploy|push)\s+(?:the\s+)?(?:branch|ref|commit)\s+{ref_token}",
-        rf"(?:将|从)\s*{refish_token}\s*(?:部署|发布|推送|推到)",
+        rf"(?:将|从)\s*{refish_token}\s*(?:部署|发布|推送|推到|推倒)",
         r"(?<![A-Za-z0-9])([0-9a-fA-F]{7,40})(?![A-Za-z0-9])",
     )
     refs: list[str] = []
@@ -542,6 +544,48 @@ def _ref_matches(actual: str, expected: str) -> bool:
         return value
 
     return bool(left and right) and normalize(left) == normalize(right)
+
+
+def _is_exact_hex_ref(ref: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", ref.strip()))
+
+
+def _prod_detached_ref_authorized(text: str, ref: str) -> bool:
+    """Require explicit exception language for prod deploys pinned to a commit.
+
+    The normal production release lane should deploy the shared branch state.
+    A commit-SHA deploy is still possible, but it must be named as an
+    emergency/pinned/detached exception by the current user text, not merely by
+    an assistant-generated plan.
+    """
+    if not _is_exact_hex_ref(ref):
+        return True
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    exception_markers = (
+        "detached",
+        "pinned",
+        "pin sha",
+        "pinned sha",
+        "commit hash",
+        "指定 commit",
+        "指定 sha",
+        "固定 sha",
+        "固定提交",
+        "精确 commit",
+        "精确 sha",
+        "直接 checkout",
+        "直接切",
+        "不走 master",
+        "未合入 master",
+        "脱离 master",
+        "应急",
+        "紧急",
+        "例外",
+    )
+    if not any(marker in normalized for marker in exception_markers):
+        return False
+    explicit_refs = _explicit_plan_refs(text)
+    return any(_ref_matches(ref, expected) for expected in explicit_refs)
 
 
 def _git_resolve_ref(cwd: str | None, ref: str) -> str:
@@ -643,6 +687,13 @@ def _server_authorization_text(
     if transports and transport not in transports:
         return current
     if ref:
+        if (
+            environment == "prod"
+            and "deploy" in expected_actions
+            and _is_exact_hex_ref(ref)
+            and not _prod_detached_ref_authorized(current, ref)
+        ):
+            return current
         action_clauses = [
             clause
             for clause in _positive_plan_clauses(raw_plan)
@@ -933,7 +984,7 @@ def _mentions_current_branch(text: str) -> bool:
 
 def _push_authorized(text: str, args: list[str], *, cwd: str | None = None, protected_targets: list[str] | None = None) -> bool:
     ref_text = " ".join(_push_refspecs(args) + _push_targets(args) + _push_sources(args)).lower()
-    push_word = bool(re.search(r"\bpush\b|推送|推上去|推到|推吧", text, re.IGNORECASE))
+    push_word = bool(re.search(r"\bpush\b|推送|推上去|推到|推倒|推吧", text, re.IGNORECASE))
     if not push_word:
         return False
     if not _push_refspecs(args):
@@ -1810,14 +1861,21 @@ def _handle_prodctl(
             return False, f"prodctl host {host} is not present in policy"
         if env in {"prod", "pre", "test"}:
             service = _option_value(args, "--service")
+            ref = _option_value(args, "--ref")
             transcript = server_transcript_text(
                 environment=env,
                 actions=[action],
                 service=service,
                 host=host,
                 transport="prodctl",
-                ref=_option_value(args, "--ref"),
+                ref=ref,
             )
+            if env == "prod" and subcommand == "deploy" and _is_exact_hex_ref(ref):
+                if not _prod_detached_ref_authorized(transcript, ref):
+                    return (
+                        False,
+                        "prod detached commit deploy requires explicit current-turn emergency/pinned-detached authorization matching ref; use master deploy by default",
+                    )
             env_alias_ok = _text_has_alias(transcript, _aliases(policy, "env", env))
             host_ok = not host_policy or _host_authorized(policy, host, host_policy, transcript) or env_alias_ok
             env_ok = env_alias_ok or host_ok

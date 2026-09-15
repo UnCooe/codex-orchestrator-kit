@@ -798,6 +798,82 @@ def test_check_lineage_blocks_validated_ref_not_returned_to_feature(tmp_path):
     assert payload["lineage"]["validated_ref"] == "pre-validated"
 
 
+def test_prepare_protected_sync_freezes_checked_head_to_master_push(tmp_path):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    base_branch = current_branch(repo)
+    run(["git", "branch", "-m", base_branch, "master"], repo)
+    run(["git", "checkout", "-b", "feature"], repo)
+    commit_file(repo, "README.md", "base\nfeature\n", "feature change")
+    run(["git", "checkout", "-b", "integration", "master"], repo)
+    run(["git", "merge", "--no-ff", "feature", "-m", "merge feature"], repo)
+
+    code, payload = guard(
+        "prepare-protected-sync",
+        "--cwd",
+        str(repo),
+        "--target-ref",
+        "master",
+        "--source-ref",
+        "HEAD",
+        "--validated-ref",
+        "feature",
+        "--test",
+        "focused tests passed",
+        "--review",
+        "reviewed; no P1-now",
+        "--push-auth",
+        "sync checked result to master only; no deploy or restart",
+    )
+
+    assert code == 0, payload
+    assert payload["push_command"] == "git push origin HEAD:master"
+    assert payload["forbidden_actions"] == ["deploy", "restart", "force-push", "server-mutation"]
+    state = json.loads((repo / ".codex-local" / "merge-safety" / "current.json").read_text(encoding="utf-8"))
+    assert state["operation"] == "push"
+    assert state["target_ref"] == "master"
+    assert state["source_ref"] == "HEAD"
+    assert state["validated_ref"] == "feature"
+    assert state["last_post_check"]["ok"] is True
+    assert state["lineage_proof"]["validated_in_result"]["ok"] is True
+
+
+def test_prepare_protected_sync_rejects_deploy_or_restart_scope(tmp_path):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+
+    code, payload = guard(
+        "prepare-protected-sync",
+        "--cwd",
+        str(repo),
+        "--target-ref",
+        "master",
+        "--deploy",
+    )
+
+    assert code == 1
+    assert "does not authorize deploy or restart" in payload["message"]
+
+
+def test_prepare_protected_sync_rejects_unresolved_refs(tmp_path):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+
+    code, payload = guard(
+        "prepare-protected-sync",
+        "--cwd",
+        str(repo),
+        "--target-ref",
+        "missing-master",
+        "--source-ref",
+        "HEAD",
+    )
+
+    assert code == 1
+    assert payload["message"] == "protected sync refs must resolve"
+    assert "target_ref missing-master" in payload["missing_refs"]
+
+
 def test_hotfix_like_intent_requires_explicit_user_flag(tmp_path):
     repo = tmp_path / "repo"
     init_repo(repo)

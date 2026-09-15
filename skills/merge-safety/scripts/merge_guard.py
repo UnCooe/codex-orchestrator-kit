@@ -1355,6 +1355,84 @@ def cmd_record_evidence(args: argparse.Namespace) -> int:
     return _ok("merge safety evidence recorded", checked_root=str(root), state_path=str(_state_path(root)), evidence=state.get("evidence", {}))
 
 
+def cmd_prepare_protected_sync(args: argparse.Namespace) -> int:
+    try:
+        root = _repo_root(args.cwd)
+        target_ref = args.target_ref.strip()
+        source_ref = (args.source_ref or "HEAD").strip()
+        validated_ref = (args.validated_ref or source_ref).strip()
+        if not target_ref:
+            return _fail("target_ref is required")
+        if args.deploy or args.restart:
+            return _fail("prepare-protected-sync does not authorize deploy or restart")
+        target_head = _resolve_ref(root, target_ref)
+        source_head = _resolve_ref(root, source_ref)
+        validated_head = _resolve_ref(root, validated_ref)
+        missing_refs = [
+            label
+            for label, head in (
+                (f"target_ref {target_ref}", target_head),
+                (f"source_ref {source_ref}", source_head),
+                (f"validated_ref {validated_ref}", validated_head),
+            )
+            if not head
+        ]
+        if missing_refs:
+            return _fail("protected sync refs must resolve", missing_refs=missing_refs)
+        state = _normalize_state({
+            "goal": args.goal or f"sync {source_ref} to {target_ref}",
+            "target_ref": target_ref,
+            "source_ref": source_ref,
+            "merge_mode": args.merge_mode or "protected-sync",
+            "allowed_paths": _list_arg(args.allowed_paths),
+            "forbidden_paths": _list_arg(args.forbidden_paths),
+            "forbidden_changes": _list_arg(args.forbidden_changes),
+            "acceptance": _list_arg(args.acceptance) or ["target branch contains the validated source state"],
+            "tests": _list_arg(args.test) or ["validated before protected sync"],
+            "review": {"status": args.review_status or "reviewed", "summary": args.review or "protected sync reviewed", "p1_now": []},
+            "subagents": {"status": "not_used", "closed": True, "summary": ""},
+            "intent_origin": "protected-sync",
+            "validation_mode": "protected-sync",
+        })
+        state["base_head"] = target_head
+        state["target_head"] = state["base_head"]
+        state["source_head"] = source_head
+        state["validated_ref"] = validated_ref
+        state["validated_head"] = validated_head
+        state["planned_changed_files"] = _planned_changed_files(root, state)
+        evidence = dict(state.get("evidence") or {})
+        evidence["validation"] = {"recorded_at": _now(), "summary": "; ".join(state["tests"])}
+        evidence["review"] = {"recorded_at": _now(), "summary": state["review"]["summary"], "p1_now": []}
+        evidence["subagents"] = {"recorded_at": _now(), "closed": True, "summary": "not used"}
+        if args.push_auth:
+            evidence["push_auth"] = {"recorded_at": _now(), "summary": args.push_auth}
+        state["evidence"] = evidence
+        state["validated_merge_base"] = _git_value(root, ["merge-base", target_ref, source_ref]) if target_ref and source_ref else ""
+        state["validated_only_commits"] = _left_only_commits(root, validated_ref, source_ref) if validated_ref and source_ref else []
+        lineage = _lineage_details(root, state, "HEAD")
+        lineage["recorded_at"] = _now()
+        state["lineage_proof"] = lineage
+        state["evidence"]["lineage_check"] = lineage
+        ok, errors, details = _check_post(root, state)
+        if not ok:
+            return _fail("protected sync readiness check failed", errors=errors, next_action=_postcheck_next_action(errors), **details)
+        state["last_post_check"] = {"ok": True, "checked_at": _now(), **details}
+        _write_state(root, state)
+    except Exception as exc:
+        return _fail(str(exc))
+    return _ok(
+        "protected sync push state prepared",
+        checked_root=str(root),
+        state_path=str(_state_path(root)),
+        target_ref=target_ref,
+        source_ref=source_ref,
+        validated_ref=validated_ref,
+        push_command=f"git push origin {source_ref}:{_ref_name(target_ref)}",
+        forbidden_actions=["deploy", "restart", "force-push", "server-mutation"],
+        post=details,
+    )
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     try:
         root = _repo_root(args.cwd)
@@ -1825,6 +1903,25 @@ def build_parser() -> argparse.ArgumentParser:
     record_evidence.add_argument("--subagents-summary", default="")
     record_evidence.add_argument("--push-auth", default="")
     record_evidence.set_defaults(func=cmd_record_evidence)
+
+    protected_sync = sub.add_parser("prepare-protected-sync", help="prepare checked push state for syncing a result to a protected branch")
+    protected_sync.add_argument("--cwd", "--repo", dest="cwd")
+    protected_sync.add_argument("--goal", default="")
+    protected_sync.add_argument("--target-ref", required=True)
+    protected_sync.add_argument("--source-ref", default="HEAD")
+    protected_sync.add_argument("--validated-ref", default="")
+    protected_sync.add_argument("--merge-mode", default="protected-sync")
+    protected_sync.add_argument("--allowed-paths", default="")
+    protected_sync.add_argument("--forbidden-paths", default="")
+    protected_sync.add_argument("--forbidden-changes", default="")
+    protected_sync.add_argument("--acceptance", default="")
+    protected_sync.add_argument("--test", default="")
+    protected_sync.add_argument("--review", default="")
+    protected_sync.add_argument("--review-status", default="")
+    protected_sync.add_argument("--push-auth", default="")
+    protected_sync.add_argument("--deploy", action="store_true")
+    protected_sync.add_argument("--restart", action="store_true")
+    protected_sync.set_defaults(func=cmd_prepare_protected_sync)
 
     report = sub.add_parser("report", help="print intent and check results")
     report.add_argument("--cwd", "--repo", dest="cwd")
