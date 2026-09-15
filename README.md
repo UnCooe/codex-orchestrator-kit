@@ -158,28 +158,36 @@ See [the observability skill](skills/orchestrator-observability/SKILL.md) and
 
 `scripts/workspace_lifecycle.py` is the first, offline part of the workspace
 lifecycle contract. It records task ownership outside the project repository and
-classifies registered worktrees as clean, active, unowned-dirty, missing, or
-stale. It never switches branches, commits, or removes worktrees.
+classifies registered worktrees as clean, active, pending-closure,
+quarantined, unowned-dirty, missing, or stale. It never switches branches,
+commits, or removes worktrees.
 
 `scripts/workspace_lifecycle_adapter.py` is the matching read-only payload
 adapter. It recognizes the common lifecycle events and returns a shadow
 decision for missing ownership, cross-task reuse, and incomplete handoff. It
 does not enforce writes. The shadow hook connects it after the real-payload
 canary: clean session/prompt starts record an `active` claim, clean `Stop`
-events record `ready`, and dirty or conflicting worktrees only emit a warning.
-The hook writes JSON ledger state outside the project and never blocks tools,
-commits files, switches branches, or removes worktrees.
+events record `ready`; a known dirty stop is recorded as `pending_closure` and
+queued for the original task, while an unattributed legacy state remains a
+warning. The hook writes JSON ledger/queue state outside the project and never
+blocks tools, commits files, switches branches, or removes worktrees.
 
 Run the read-only contract against any Git repository:
 
 ```bash
 python3 scripts/workspace_lifecycle.py audit --repo /path/to/repo \
   --state-dir /tmp/workspace-ledger-shadow
+python3 scripts/workspace_lifecycle_reconcile.py inventory --repo /path/to/repo \
+  --state-dir /tmp/workspace-ledger-shadow
 ```
 
 The live integration remains shadow-only. It is a bookkeeping aid for task
 attribution, not a guarantee that every session will commit or close a
-worktree; when identity or `cwd` is absent, it does not guess.
+worktree; when identity or `cwd` is absent, it does not guess. The Codex app can
+read a queued owner-recall item and send the original task a follow-up. Stale
+secondary worktrees can be previewed with `reconcile.py expire`; deletion is
+explicit, path-scoped, and defaults to a 30-day threshold. The primary checkout
+is always refused.
 
 ## Repository Layout
 
@@ -190,6 +198,8 @@ worktree; when identity or `cwd` is absent, it does not guess.
 - `templates/`: canonical hook and global instruction templates
 - `scripts/verify_skill_install.py`: source/live parity verifier
 - `scripts/workspace_lifecycle.py`: task-to-worktree ownership and audit contract
+- `scripts/workspace_lifecycle_reconcile.py`: owner-recall queue, quarantine,
+  read-only inventory, and path-scoped stale-worktree expiry
 - `scripts/workspace_lifecycle_adapter.py`: read-only lifecycle payload adapter
 - `scripts/workflow_mvp_dry_run.py`: static distribution inventory
 - `tests/`: routing, safety, installer, merge, and observability tests

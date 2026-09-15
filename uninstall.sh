@@ -345,6 +345,7 @@ if [[ "$SKILLS_ONLY" != "1" ]]; then
   "$CODEX_TARGET/hooks/pilot_receipt_gate.py"
   "$CODEX_TARGET/workspace-lifecycle/workspace_lifecycle.py"
   "$CODEX_TARGET/workspace-lifecycle/workspace_lifecycle_adapter.py"
+  "$CODEX_TARGET/workspace-lifecycle/workspace_lifecycle_reconcile.py"
   "$CODEX_TARGET/agents/critic.toml"
   "$CODEX_TARGET/agents/implementer.toml"
   "$CODEX_TARGET/agents/researcher.toml"

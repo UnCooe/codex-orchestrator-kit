@@ -852,7 +852,7 @@ if [[ -e "$UNINSTALL_CODEX/hooks/workspace_lifecycle_shadow.py" ]]; then
   echo "uninstall.sh left workspace lifecycle shadow hook installed" >&2
   exit 1
 fi
-if [[ -e "$UNINSTALL_CODEX/workspace-lifecycle/workspace_lifecycle.py" || -e "$UNINSTALL_CODEX/workspace-lifecycle/workspace_lifecycle_adapter.py" ]]; then
+if [[ -e "$UNINSTALL_CODEX/workspace-lifecycle/workspace_lifecycle.py" || -e "$UNINSTALL_CODEX/workspace-lifecycle/workspace_lifecycle_adapter.py" || -e "$UNINSTALL_CODEX/workspace-lifecycle/workspace_lifecycle_reconcile.py" ]]; then
   echo "uninstall.sh left workspace lifecycle library installed" >&2
   exit 1
 fi

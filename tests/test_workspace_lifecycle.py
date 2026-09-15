@@ -63,6 +63,87 @@ class WorkspaceLifecycleTests(unittest.TestCase):
             self.assertFalse(other["ok"])
             self.assertEqual(other["status"], "conflict")
 
+    def test_pending_closure_records_owner_recall_without_touching_git(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            repo = make_repo(tmp_path)
+            state = tmp_path / "state"
+            lifecycle.claim(repo, task_id="task-1", thread_id="thread-1", state_dir=state)
+            (repo / "README.md").write_text("unfinished\n", encoding="utf-8")
+
+            result = lifecycle.record_pending_closure(repo, task_id="task-1", state_dir=state)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "pending_closure")
+            self.assertEqual(lifecycle.load_binding(repo, state)["state"], "pending_closure")
+            queue = lifecycle.list_queue(state)
+            self.assertEqual(len(queue), 1)
+            self.assertEqual(queue[0]["kind"], "owner_recall")
+            self.assertEqual(queue[0]["thread_id"], "thread-1")
+            self.assertEqual(git(repo, "status", "--porcelain"), "M README.md")
+
+    def test_pending_owner_blocks_other_task_but_original_owner_can_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            repo = make_repo(tmp_path)
+            state = tmp_path / "state"
+            lifecycle.claim(repo, task_id="task-1", thread_id="thread-1", state_dir=state)
+            (repo / "README.md").write_text("unfinished\n", encoding="utf-8")
+            lifecycle.record_pending_closure(repo, task_id="task-1", state_dir=state)
+
+            other = lifecycle.claim(repo, task_id="task-2", state_dir=state)
+            resumed = lifecycle.claim(repo, task_id="task-1", thread_id="thread-1", state_dir=state)
+
+            self.assertFalse(other["ok"])
+            self.assertEqual(other["status"], "pending_owner")
+            self.assertTrue(resumed["ok"])
+            self.assertEqual(resumed["binding"]["state"], "active")
+
+    def test_quarantine_preserves_history_without_assigning_an_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            repo = make_repo(tmp_path)
+            state = tmp_path / "state"
+            (repo / "README.md").write_text("legacy\n", encoding="utf-8")
+
+            result = lifecycle.quarantine_legacy(
+                repo,
+                state_dir=state,
+                candidate_task_id="legacy-task",
+                candidate_thread_id="legacy-thread",
+            )
+
+            self.assertTrue(result["ok"])
+            binding = lifecycle.load_binding(repo, state)
+            self.assertEqual(binding["state"], "quarantined")
+            self.assertEqual(binding["task_id"], "")
+            self.assertEqual(binding["historical_thread_id"], "legacy-thread")
+            self.assertEqual(lifecycle.list_queue(state)[0]["kind"], "legacy_quarantine")
+
+    def test_adopt_requires_explicit_previous_owner_and_records_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            repo = make_repo(tmp_path)
+            state = tmp_path / "state"
+            lifecycle.claim(repo, task_id="old-task", thread_id="old-thread", state_dir=state)
+            lifecycle.transition(repo, task_id="old-task", state="ready", state_dir=state)
+            (repo / "README.md").write_text("late change\n", encoding="utf-8")
+
+            adopted = lifecycle.adopt(
+                repo,
+                task_id="new-task",
+                thread_id="new-thread",
+                previous_task_id="old-task",
+                reason="old task confirmed complete",
+                state_dir=state,
+            )
+
+            self.assertTrue(adopted["ok"])
+            binding = lifecycle.load_binding(repo, state)
+            self.assertEqual(binding["task_id"], "new-task")
+            self.assertEqual(binding["adopted_from"], "old-task")
+            self.assertEqual(binding["previous_binding"]["thread_id"], "old-thread")
+
 
     def test_ready_requires_clean_and_handoff_records_artifact_hash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -134,6 +215,24 @@ class WorkspaceLifecycleTests(unittest.TestCase):
             self.assertEqual(Path(payload["repo_root"]).resolve(), repo.resolve())
             self.assertFalse(payload["mutated"])
             self.assertFalse(state.exists(), "read-only audit must not create a state directory")
+
+    def test_cli_queue_is_read_only_and_lists_pending_items(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            repo = make_repo(tmp_path)
+            state = tmp_path / "state"
+            lifecycle.claim(repo, task_id="task-1", state_dir=state)
+            (repo / "README.md").write_text("dirty\n", encoding="utf-8")
+            lifecycle.record_pending_closure(repo, task_id="task-1", state_dir=state)
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/workspace_lifecycle.py"), "queue", "--state-dir", str(state)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(result.stdout)
+            self.assertFalse(payload["mutated"])
+            self.assertEqual(len(payload["items"]), 1)
 
     def test_audit_reports_registered_but_missing_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

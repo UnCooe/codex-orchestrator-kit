@@ -229,6 +229,10 @@ def handle_payload(
     if event in {"SessionStart", "UserPromptSubmit"}:
         if status == "unowned_dirty":
             result.update({"decision": "shadow_warn", "message": "dirty changes have no task owner; attribute them before writing"})
+        elif status in {"ready_dirty", "archived_dirty"}:
+            result.update({"decision": "shadow_warn", "message": "a prior task left dirty changes after its terminal state; route to the recorded owner or quarantine it"})
+        elif status in {"pending_closure_dirty", "quarantined_dirty"}:
+            result.update({"decision": "shadow_warn", "message": "this worktree has an unresolved reconciliation item; do not overwrite it"})
         elif active_binding and not same_task:
             result.update({"decision": "shadow_warn", "message": "another active task owns this worktree; use a dedicated worktree"})
         elif binding and binding.get("state") == "handoff" and same_task:
@@ -260,7 +264,7 @@ def handle_payload(
         if status == "unowned_dirty":
             result.update({"decision": "shadow_warn", "message": "task stopped with unowned changes; preserve attribution before leaving"})
         elif active_binding and paths:
-            result.update({"decision": "shadow_warn", "message": "task stopped dirty; transition to handoff or commit before ready"})
+            result.update({"decision": "shadow_warn", "message": "task stopped dirty; the shadow hook will place it in the owner-closure queue; commit or handoff before ready"})
         elif active_binding and not paths:
             result.update({"decision": "shadow_warn", "message": "task stopped clean; record ready or archived explicitly"})
         else:

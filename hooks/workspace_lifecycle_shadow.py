@@ -2,10 +2,10 @@
 """Shadow-only Codex hook for task-to-worktree lifecycle bookkeeping.
 
 This entrypoint is intentionally narrow: it records ownership at session or
-prompt start when the worktree is clean, and records a clean task as ready at
-Stop. Dirty or conflicting worktrees only produce additional context. It
-never denies a tool, changes Git content, commits, switches branches, or
-removes a worktree.
+prompt start when the worktree is clean, records a clean task as ready at
+Stop, and queues a known dirty task for owner closure. Dirty or conflicting
+worktrees only produce additional context. It never denies a tool, changes
+Git content, commits, switches branches, or removes a worktree.
 """
 
 from __future__ import annotations
@@ -81,11 +81,33 @@ def handle(payload: dict[str, Any], *, state_dir: str | Path | None = None) -> d
         transitioned = lifecycle.transition(worktree, task_id=task_id, state="ready", state_dir=state)
         observed["transition"] = {key: transitioned.get(key) for key in ("ok", "status", "message", "state_file") if key in transitioned}
         action = "ready" if transitioned.get("ok") else "ready_rejected"
-    elif observed.get("status") in {"unowned_dirty", "active_dirty", "handoff_clean", "handoff_dirty"}:
+    elif task_id and worktree and observed.get("status") == "active_dirty" and event == "Stop":
+        pending = lifecycle.record_pending_closure(
+            worktree,
+            task_id=task_id,
+            thread_id=str(observed.get("thread_id") or task_id),
+            state_dir=state,
+        )
+        observed["pending_closure"] = {
+            key: pending.get(key)
+            for key in ("ok", "status", "message", "state_file", "queue_file", "queue_id")
+            if key in pending
+        }
+        action = "pending_closure" if pending.get("ok") else "warn"
+    elif observed.get("status") in {
+        "unowned_dirty",
+        "active_dirty",
+        "handoff_clean",
+        "handoff_dirty",
+        "ready_dirty",
+        "archived_dirty",
+        "pending_closure_dirty",
+        "quarantined_dirty",
+    }:
         action = "warn"
 
     observed["action"] = action
-    observed["mutated"] = action in {"claim", "ready"}
+    observed["mutated"] = action in {"claim", "ready", "pending_closure"}
     if action == "warn":
         _context(str(event or ""), str(observed.get("message") or ""))
     return observed

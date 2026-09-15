@@ -82,6 +82,38 @@ class WorkspaceLifecycleShadowHookTests(unittest.TestCase):
             self.assertTrue(result["mutated"])
             self.assertEqual(lifecycle.load_binding(repo, state)["state"], "ready")
 
+    def test_stop_dirty_owned_task_queues_owner_recall_without_git_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root)
+            state = root / "state"
+            shadow.handle(payload(repo, "SessionStart", "task-1"), state_dir=state)
+            (repo / "README.md").write_text("unfinished\n", encoding="utf-8")
+
+            result = shadow.handle(payload(repo, "Stop", "task-1"), state_dir=state)
+
+            self.assertEqual(result["action"], "pending_closure")
+            self.assertTrue(result["mutated"])
+            self.assertEqual(result["pending_closure"]["status"], "pending_closure")
+            self.assertEqual(lifecycle.load_binding(repo, state)["state"], "pending_closure")
+            self.assertEqual(len(lifecycle.list_queue(state)), 1)
+            self.assertEqual(git(repo, "status", "--porcelain"), "M README.md")
+
+    def test_ready_dirty_is_warned_and_not_reclaimed_by_other_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root)
+            state = root / "state"
+            shadow.handle(payload(repo, "SessionStart", "task-1"), state_dir=state)
+            lifecycle.transition(repo, task_id="task-1", state="ready", state_dir=state)
+            (repo / "README.md").write_text("late legacy change\n", encoding="utf-8")
+
+            result = shadow.handle(payload(repo, "SessionStart", "task-2"), state_dir=state)
+
+            self.assertEqual(result["action"], "warn")
+            self.assertFalse(result["mutated"])
+            self.assertEqual(lifecycle.load_binding(repo, state)["task_id"], "task-1")
+
     def test_terminal_clean_binding_can_be_replaced_by_next_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

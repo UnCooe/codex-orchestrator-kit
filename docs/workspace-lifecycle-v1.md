@@ -17,13 +17,26 @@ directory name.
 - `active`: the task owns the worktree and may still be editing it.
 - `handoff`: the task is paused or handed to another session; an external
   artifact hash records the preserved handoff evidence.
+- `pending_closure`: a known task stopped with dirty changes. The binding keeps
+  its task/thread id and a queue item is available for direct owner recall.
+- `quarantined`: dirty changes have no verified owner. They are isolated from
+  new claims until a human or the original session establishes provenance.
 - `ready`: the task has a clean worktree and is ready for review or promotion.
 - `archived`: the task is terminal and the worktree is clean.
+- `expired`: an explicitly named stale secondary worktree was removed by the
+  reconciliation command; this state is never used for the primary checkout.
 
 An unclaimed dirty worktree is reported as `unowned_dirty`. A different task
 trying to claim an active worktree is reported as `conflict`. A terminal task
 may be replaced by a new task only when the worktree is clean; the previous
 claim is retained in the binding history.
+
+When a known task stops dirty, the shadow hook changes only the ledger state to
+`pending_closure` and writes an owner-recall queue record. The queue is not a
+commit or a deletion. When the owner later commits and reaches `ready` or
+`archived`, the queue item is marked resolved. Legacy dirty states without a
+verified owner can be placed in `quarantined` by the reconciliation command;
+the historical ids are retained as candidates, never treated as proof.
 
 ## Commands
 
@@ -32,6 +45,15 @@ python3 scripts/workspace_lifecycle.py audit --repo /path/to/repo
 python3 scripts/workspace_lifecycle.py inspect --worktree /path/to/worktree
 python3 scripts/workspace_lifecycle.py claim --worktree /path/to/worktree --task-id TASK
 python3 scripts/workspace_lifecycle.py transition --worktree /path/to/worktree --task-id TASK --state ready
+python3 scripts/workspace_lifecycle.py queue --state-dir /path/to/state
+
+# Read-only reconciliation and owner/expiry classification
+python3 scripts/workspace_lifecycle_reconcile.py inventory --repo /path/to/repo
+python3 scripts/workspace_lifecycle_reconcile.py queue --state-dir /path/to/state
+
+# Preview first; only explicitly named stale secondary worktrees can be removed
+python3 scripts/workspace_lifecycle_reconcile.py expire --repo /path/to/repo \
+  --worktree /path/to/old-worktree --older-than-days 30
 ```
 
 State files default to `~/.codex/workspace-ledger-v1`; set
@@ -46,8 +68,18 @@ would be attributed or blocked, and keeps `mutated: false` in both `shadow`
 and isolated `enforce` mode. The shadow hook calls the same contract after the
 real payload canary: it claims clean worktrees at session/prompt start and
 records `ready` for clean `Stop` events. Dirty or conflicting states only
-produce additional context. Missing task identity or `cwd` is left
-unattributed rather than inferred from a directory name.
+queue known dirty tasks for owner recall and produce additional context.
+Missing task identity or `cwd` is left unattributed rather than inferred from
+a directory name. No live hook sends messages itself: the Codex app (or a
+human-operated dispatcher) consumes the queue and calls the original task.
+
+`workspace_lifecycle_reconcile.py` is intentionally conservative. It can
+classify a queue item as `owner_recall` when the binding contains a verified
+thread id, or `quarantine_review` otherwise. `expire` defaults to a 30-day
+threshold but is dry-run unless `--apply` is supplied, requires exact
+`--worktree` paths, refuses the primary checkout, and never deletes individual
+files from a dirty main worktree. A scheduler may invoke `inventory` daily;
+this repository does not install a new scheduler or modify live Codex config.
 
 ## Payload adapter
 
