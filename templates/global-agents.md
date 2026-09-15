@@ -37,6 +37,18 @@ version: global-instructions-v1-workflow-core
 - If a user's approval depends on a premise that is later proven false, such as assuming `master` already contains a fix, the approval no longer applies; stop and ask with the corrected fact.
 - If source evidence cannot decide a product, compatibility, default, edge-case, or data-loss choice, stop and ask.
 
+## Workspace Lifecycle
+
+- If a lifecycle warning or owner-closure queue is present, do not scan or
+  overwrite the dirty worktree just because it is visible. A verified
+  `thread_id` is an invitation to send one concise follow-up to that original
+  task; it is not permission to edit on its behalf.
+- If no owner can be verified, keep the worktree quarantined. Do not infer an
+  owner from a branch name, a path mentioned in a transcript, or a similar
+  task.
+- Expiry cleanup is limited to explicitly listed secondary worktrees after a
+  dry-run and recovery snapshot. Never delete files from the primary checkout.
+
 ## Personal Branch And Shared-Environment Defaults
 
 - For follow-up work on the same requirement, continue on the already identified source feature/fix branch unless source evidence proves it is a new independent task.
