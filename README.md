@@ -181,6 +181,12 @@ python3 scripts/workspace_lifecycle_reconcile.py inventory --repo /path/to/repo 
   --state-dir /tmp/workspace-ledger-shadow
 ```
 
+`inventory` also checks the local session archive for a unique, direct
+`git worktree add` event.  It uses only session metadata and command events,
+never conversation text.  Use `--no-session-index` for an offline check that
+must not inspect sessions; multiple creators or missing direct evidence remain
+`quarantine_review`.
+
 The live integration remains shadow-only. It is a bookkeeping aid for task
 attribution, not a guarantee that every session will commit or close a
 worktree; when identity or `cwd` is absent, it does not guess. The Codex app can
@@ -200,6 +206,8 @@ is always refused.
 - `scripts/workspace_lifecycle.py`: task-to-worktree ownership and audit contract
 - `scripts/workspace_lifecycle_reconcile.py`: owner-recall queue, quarantine,
   read-only inventory, and path-scoped stale-worktree expiry
+- `scripts/workspace_lifecycle_owner_index.py`: conservative session-event
+  lookup for a unique worktree creator
 - `scripts/workspace_lifecycle_adapter.py`: read-only lifecycle payload adapter
 - `scripts/workflow_mvp_dry_run.py`: static distribution inventory
 - `tests/`: routing, safety, installer, merge, and observability tests

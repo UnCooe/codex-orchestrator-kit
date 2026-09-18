@@ -75,7 +75,10 @@ human-operated dispatcher) consumes the queue and calls the original task.
 
 `workspace_lifecycle_reconcile.py` is intentionally conservative. It can
 classify a queue item as `owner_recall` when the binding contains a verified
-thread id, or `quarantine_review` otherwise. `expire` defaults to a 30-day
+thread id or when `workspace_lifecycle_owner_index.py` finds exactly one direct
+`git worktree add` creator in session metadata. It never infers ownership from
+reads, search output, compacted history, or directory names. Ambiguous paths
+remain `quarantine_review`. `expire` defaults to a 30-day
 threshold but is dry-run unless `--apply` is supplied, requires exact
 `--worktree` paths, refuses the primary checkout, and never deletes individual
 files from a dirty main worktree. A scheduler may invoke `inventory` daily;
