@@ -355,7 +355,7 @@ class InstallHookContractTests(unittest.TestCase):
                 for path in (root / "codex" / "workspace-lifecycle").glob("*.py")
                 if path.is_file()
             }
-            self.assertEqual(installed_library, {"workspace_lifecycle.py", "workspace_lifecycle_adapter.py", "workspace_lifecycle_reconcile.py"})
+            self.assertEqual(installed_library, {"workspace_lifecycle.py", "workspace_lifecycle_adapter.py", "workspace_lifecycle_reconcile.py", "workspace_lifecycle_owner_index.py"})
 
     def test_bash_skill_verification_failure_happens_before_runtime_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

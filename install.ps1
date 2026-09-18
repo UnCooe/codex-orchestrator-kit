@@ -833,7 +833,7 @@ if (-not $SkillsOnly.IsPresent) {
         }
         )
     }
-    foreach ($libraryName in @('workspace_lifecycle.py', 'workspace_lifecycle_adapter.py')) {
+    foreach ($libraryName in @('workspace_lifecycle.py', 'workspace_lifecycle_adapter.py', 'workspace_lifecycle_reconcile.py', 'workspace_lifecycle_owner_index.py')) {
         $planTargets += @(
         @{
             Source = Join-Path (Join-Path $scriptRoot 'scripts') $libraryName
@@ -891,7 +891,7 @@ Invoke-SkillInstallVerifier -PythonCommand $PythonCommand `
 if (-not $InstallDryRun) { Assert-ExactPathNotReparse -Path (Join-Path $CodexHome 'hooks') }
 
 if (-not $InstallDryRun) { Assert-NoReparsePoint -Path (Join-Path $CodexHome 'workspace-lifecycle') }
-foreach ($libraryName in @('workspace_lifecycle.py', 'workspace_lifecycle_adapter.py')) {
+foreach ($libraryName in @('workspace_lifecycle.py', 'workspace_lifecycle_adapter.py', 'workspace_lifecycle_reconcile.py', 'workspace_lifecycle_owner_index.py')) {
     Stage-Files `
         -Source (Join-Path (Join-Path $scriptRoot 'scripts') $libraryName) `
         -Destination (Join-Path (Join-Path $CodexHome 'workspace-lifecycle') $libraryName)

@@ -22,6 +22,7 @@ MANAGED_WORKSPACE_LIBRARY_FILES=(
   workspace_lifecycle.py
   workspace_lifecycle_adapter.py
   workspace_lifecycle_reconcile.py
+  workspace_lifecycle_owner_index.py
 )
 MANAGED_SKILLS=(
   orchestrator
