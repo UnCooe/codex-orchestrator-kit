@@ -29,6 +29,7 @@ try:
         list_queue,
         quarantine_legacy,
     )
+    from workspace_lifecycle_owner_index import index_sessions, unique_owner
 except ModuleNotFoundError:  # pragma: no cover - direct path execution fallback
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from workspace_lifecycle import (
@@ -41,6 +42,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct path execution fallback
         list_queue,
         quarantine_legacy,
     )
+    from workspace_lifecycle_owner_index import index_sessions, unique_owner
 
 
 DEFAULT_EXPIRY_DAYS = 30
@@ -79,7 +81,13 @@ def _primary_root(repo: str | os.PathLike[str]) -> str:
     return discover_worktree(repo)["worktree"]
 
 
-def _classify(item: dict[str, Any], *, primary_root: str, older_than_days: float) -> dict[str, Any]:
+def _classify(
+    item: dict[str, Any],
+    *,
+    primary_root: str,
+    older_than_days: float,
+    recovered_owner: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     paths = list(item.get("changed_paths") or [])
     binding = item.get("binding") if isinstance(item.get("binding"), dict) else {}
     state = str(binding.get("state") or "")
@@ -89,6 +97,10 @@ def _classify(item: dict[str, Any], *, primary_root: str, older_than_days: float
     thread_id = str(binding.get("thread_id") or "")
     task_id = str(binding.get("task_id") or "")
     if state in ACTIVE_STATES | PENDING_STATES and thread_id and task_id:
+        action = "owner_recall"
+    elif recovered_owner and not thread_id:
+        thread_id = str(recovered_owner.get("thread_id") or "")
+        task_id = str(recovered_owner.get("session_id") or "")
         action = "owner_recall"
     elif state == "quarantined" or not thread_id:
         action = "quarantine_review"
@@ -121,6 +133,8 @@ def _classify(item: dict[str, Any], *, primary_root: str, older_than_days: float
             if can_expire
             else ""
         ),
+        "owner_source": "session_worktree_add" if recovered_owner and not binding.get("thread_id") else ("ledger" if thread_id else ""),
+        "owner_evidence": recovered_owner or {},
     }
 
 
@@ -130,6 +144,8 @@ def inventory(
     state_dir: str | os.PathLike[str] | None = None,
     older_than_days: float = DEFAULT_EXPIRY_DAYS,
     quarantine: bool = False,
+    sessions_root: str | os.PathLike[str] | None = None,
+    session_index: bool = True,
 ) -> dict[str, Any]:
     """Produce a reconciliation report; optionally quarantine unknown dirty worktrees."""
 
@@ -137,10 +153,19 @@ def inventory(
     report = audit(repo, state_dir=state_dir)
     candidates: list[dict[str, Any]] = []
     mutations: list[dict[str, Any]] = []
+    dirty = [raw for raw in report.get("worktrees", []) if raw.get("changed_paths")]
+    owner_index: dict[str, list[dict[str, Any]]] = {}
+    if session_index:
+        session_root = sessions_root or (Path.home() / ".codex" / "sessions")
+        owner_index = index_sessions(session_root, [raw["worktree"] for raw in dirty])
     for raw in report.get("worktrees", []):
         if not raw.get("changed_paths"):
             continue
-        classified = _classify(raw, primary_root=root, older_than_days=older_than_days)
+        binding = raw.get("binding") if isinstance(raw.get("binding"), dict) else {}
+        recovered = None
+        if not binding.get("thread_id"):
+            recovered = unique_owner(owner_index.get(str(Path(raw["worktree"]).resolve()), []))
+        classified = _classify(raw, primary_root=root, older_than_days=older_than_days, recovered_owner=recovered)
         if quarantine and classified["action"] == "quarantine_review" and raw.get("status") in {
             "unowned_dirty",
             "ready_dirty",
@@ -169,6 +194,11 @@ def inventory(
         "queue": list_queue(state_dir),
         "mutations": mutations,
         "mutated": bool(mutations),
+        "owner_index": {
+            "enabled": session_index,
+            "sessions_root": str(sessions_root or (Path.home() / ".codex" / "sessions")) if session_index else "",
+            "unique_owner_count": sum(1 for item in candidates if item.get("owner_source") == "session_worktree_add"),
+        },
     }
 
 
@@ -266,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--state-dir")
     inv.add_argument("--older-than-days", type=float, default=DEFAULT_EXPIRY_DAYS)
     inv.add_argument("--quarantine", action="store_true")
+    inv.add_argument("--sessions-root", help="session JSONL root used for exact worktree-add owner lookup")
+    inv.add_argument("--no-session-index", action="store_true", help="do not inspect session metadata")
 
     exp = sub.add_parser("expire", help="preview or remove named stale secondary worktrees")
     exp.add_argument("--repo", default=".")
@@ -280,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "inventory":
-            return _emit(inventory(args.repo, state_dir=args.state_dir, older_than_days=args.older_than_days, quarantine=args.quarantine))
+            return _emit(inventory(args.repo, state_dir=args.state_dir, older_than_days=args.older_than_days, quarantine=args.quarantine, sessions_root=args.sessions_root, session_index=not args.no_session_index))
         if args.command == "expire":
             return _emit(expire(args.repo, args.worktree, state_dir=args.state_dir, older_than_days=args.older_than_days, apply=args.apply))
         if args.command == "queue":

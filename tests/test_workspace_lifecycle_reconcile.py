@@ -14,6 +14,15 @@ import workspace_lifecycle as lifecycle
 import workspace_lifecycle_reconcile as reconcile
 
 
+def write_session(root: Path, session_id: str, command: str) -> None:
+    path = root / f"{session_id}.jsonl"
+    records = [
+        {"type": "session_meta", "payload": {"session_id": session_id, "id": session_id, "cwd": "/repo"}},
+        {"type": "response_item", "timestamp": "2026-09-01T00:01:00Z", "payload": {"type": "custom_tool_call", "name": "exec", "input": f'const r = await tools.exec_command({{"cmd":{json.dumps(command)}}});'}},
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+
 def git(repo: Path, *args: str) -> str:
     result = subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
     return result.stdout.strip()
@@ -119,6 +128,25 @@ class WorkspaceLifecycleReconcileTests(unittest.TestCase):
             self.assertEqual(len(payload["items"]), 1)
             self.assertIn("thread-1", payload["owner_messages"][0])
             self.assertNotIn("dirty", payload["owner_messages"][0])
+
+    def test_inventory_recovers_unique_session_creator_without_mutating_git(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root)
+            child = root / "child"
+            git(repo, "worktree", "add", "-q", "-b", "child", str(child))
+            (child / "README.md").write_text("legacy\n", encoding="utf-8")
+            sessions = root / "sessions"
+            sessions.mkdir()
+            write_session(sessions, "thread-owner", f"git worktree add -b child {child} HEAD")
+
+            report = reconcile.inventory(repo, state_dir=root / "state", sessions_root=sessions)
+
+            item = next(value for value in report["worktrees"] if value["worktree"] == str(child.resolve()))
+            self.assertEqual(item["action"], "owner_recall")
+            self.assertEqual(item["owner_source"], "session_worktree_add")
+            self.assertEqual(item["thread_id"], "thread-owner")
+            self.assertEqual(git(child, "status", "--porcelain"), "M README.md")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@
 1. `workspace_lifecycle_reconcile.py inventory` 只读扫描 Git 已登记的
    worktree，并把脏状态分成三类：
 
-   - `owner_recall`：ledger 有经过验证的 `task_id/thread_id`。由 Codex
+   - `owner_recall`：ledger 有经过验证的 `task_id/thread_id`，或 session
+     JSONL 中存在唯一、直接的 `git worktree add` 创建证据。由 Codex
      Desktop 向原任务发送一次收口消息；原任务提交、handoff 或明确放弃。
    - `quarantine_review`：没有可信 owner。保留改动和历史候选，不让新任务
      静默接管；必要时显式执行 `--quarantine`。
@@ -35,12 +36,14 @@
 - 新任务看到 `pending_closure` 或 `quarantined` 时只告警，不覆盖原改动。
 
 本仓库不自动注册 launchd/cron，也不在 hook 中调用 Desktop API。建议每天
-或每次开始工作前运行一次 `inventory`；以后若要自动提醒，可把该命令接到
+或每次开始工作前运行一次 `inventory`；它默认只读取 session 元数据和直接命令事件
+来补齐唯一创建者，不读取对话正文。以后若要自动提醒，可把该命令接到
 用户自己的本地调度器，保留同样的 dry-run 和路径边界。
 
 ## 为什么不把所有遗留都发给“最像”的任务
 
 session 日志里经常会出现子 Agent 读取过某个路径、主任务创建过多个
 worktree 或后续任务检查过旧文件。只有 ledger 的明确绑定，或可复核的原
-任务回执，才足以发送 owner recall；其余只记录为候选，避免把别人的改动
-误交给错误任务。
+任务直接执行 `git worktree add` 的唯一证据，才足以发送 owner recall；其余只
+记录为候选，避免把别人的改动误交给错误任务。若多个 session 创建过同一路径，
+索引保持 `quarantine_review`。
