@@ -30,9 +30,10 @@ version: global-instructions-v1-workflow-core
 
 - Route broad read-only architecture, dependency, endpoint, call-chain, or source-backed investigation through the orchestrator workflow.
 - Route merge, rebase, cherry-pick, pull, branch sync, PR merge, or conflict work through the orchestrator workflow so merge safety checks stay in force.
-- Server writes, deploys, restarts, pushes, releases, and environment mutations require explicit current-turn authorization.
-- When an active ops profile provides a controlled client and server wrapper, use that path for every managed-server write. Raw SSH is read-only for those hosts.
-- If the controlled path lacks a required write capability, stop and extend or repair that capability; do not substitute raw SSH, SCP, rsync, or an ad hoc remote shell write.
+- Server writes require user authorization, interpreted by the Agent from the active request and context. For routine confirmed pre/test work, hooks validate technical boundaries, not a second natural-language approval. Production retains explicit current-turn approval and controlled execution.
+- Production writes require the controlled client/server wrapper; if its capability is missing, stop and repair that path. Raw SSH remains read-only for production.
+- For confirmed pre/test environments, wrapper use is optional. A request to deploy there for verification covers the routine integration, build, deployment, service restart and checks within that project. Use the project's shared pre/test branch by default unless the user specifies otherwise; do not ask for repeated action words or SHAs. Pause only for genuine ambiguity, destructive operations, conflicting shared-environment use or a material scope change.
+- Keep task-owned edits on the source worktree, integrate through a clean worktree, and finish or explicitly hand off the task's own temporary files/worktrees. Never discard unrelated work.
 - Treat clear natural-language approval of the currently displayed, frozen plan as the user's authorization. Bind it internally to the exact environment, target, host, service, action set, and current turn; do not ask the user to repeat a SHA or machine token.
 - If a user's approval depends on a premise that is later proven false, such as assuming `master` already contains a fix, the approval no longer applies; stop and ask with the corrected fact.
 - If source evidence cannot decide a product, compatibility, default, edge-case, or data-loss choice, stop and ask.

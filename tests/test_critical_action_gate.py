@@ -135,6 +135,41 @@ def _write_aiserver_policy(root: Path) -> Path:
     return path
 
 
+def _write_aiserver_pre_policy(root: Path) -> Path:
+    path = root / "aiserver-pre-policy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": "aiserver-pre-routine-test-v1",
+                "protected_refs": ["pre", "test", "master", "main"],
+                "server_policy": {
+                    "environment_aliases": {
+                        "pre": ["pre", "staging", "预发", "预发布"],
+                        "test": ["test", "testing", "测试"],
+                        "prod": ["prod", "production", "正式", "生产", "线上"],
+                    },
+                    "action_aliases": {
+                        "deploy": ["deploy", "部署", "发布", "上线"],
+                        "restart": ["restart", "重启", "重启服务"],
+                        "git": ["git", "更新代码", "拉取代码", "切换分支"],
+                    },
+                    "hosts": {
+                        "pre": {
+                            "env": "pre",
+                            "aliases": ["aiserver-pre"],
+                            "allowed_app_dirs": ["/opt/project/aiserver"],
+                            "services": ["aiserver"],
+                        }
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _run(cmd: list[str], cwd: Path) -> str:
     proc = subprocess.run(cmd, cwd=str(cwd), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
@@ -203,6 +238,35 @@ def _assert_matching_intent_reason(testcase: unittest.TestCase, result: dict[str
 
 
 class CriticalActionGateContractTests(unittest.TestCase):
+    def test_restart_dry_run_is_not_a_production_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for action in ('restart', 'restart-service'):
+                result = _run_gate(_payload(
+                    f'git status --short --branch; ./prodctl {action} --host app-prod-1 --service example-app --dry-run',
+                    cwd=root))
+                self.assertEqual(result['decision'], 'allow', result)
+
+    def test_dry_run_does_not_authorize_neighboring_real_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for command in (
+                './prodctl restart --host app-prod-1 --service example-app --dry-run; ./prodctl restart --host app-prod-1 --service example-app',
+                './prodctl restart --host app-prod-1 --service example-app; echo --dry-run',
+                './prodctl restart --host app-prod-1 --service example-app --approval-token "--dry-run"',
+            ):
+                result = _run_gate(_payload(command, cwd=root))
+                self.assertEqual(result['decision'], 'block', result)
+
+    def test_readonly_ssh_standard_descriptor_duplication_is_not_file_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for redirection in ("2>&1", "1>&2"):
+                result = _run_gate(_payload("ssh app-pre-1 'systemctl status example-app " + redirection + "'", cwd=root))
+                self.assertEqual(result.get("decision"), "allow", result)
+            result = _run_gate(_payload("ssh app-pre-1 'systemctl status example-app > /etc/unauthorized'", cwd=root))
+            self.assertEqual(result.get("decision"), "block", result)
+
     def test_raw_block_output_uses_pretool_permission_deny_protocol_without_legacy_decision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "repo"
@@ -431,6 +495,69 @@ class CriticalActionGateContractTests(unittest.TestCase):
             self.assertEqual(allowed.get("decision"), "allow")
             self.assertTrue(allowed.get("silent"), allowed)
 
+    def test_pre_and_test_protected_push_can_rely_on_complete_merge_safety_evidence_without_push_words(self) -> None:
+        cases = (
+            ("pre", "上预发验证"),
+            ("test", "上测试验证"),
+        )
+
+        for target_ref, user_text in cases:
+            with self.subTest(target=target_ref):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir) / "repo"
+                    _init_git_repo(root, branch="feature/demo")
+                    transcript = _write_transcript(root, user_text)
+                    _write_merge_safety_state(
+                        root,
+                        operation="push",
+                        target_ref=target_ref,
+                        source_ref="HEAD",
+                        precheck_ok=True,
+                        validation_ok=True,
+                        review_ok=True,
+                        lineage_ok=True,
+                        postcheck_ok=True,
+                    )
+
+                    allowed = _run_gate(
+                        _payload(
+                            f"git push origin HEAD:{target_ref}",
+                            cwd=root,
+                            transcript_path=str(transcript),
+                        )
+                    )
+
+                    self.assertEqual(allowed.get("decision"), "allow", allowed)
+                    self.assertTrue(allowed.get("silent"), allowed)
+
+    def test_master_protected_push_still_requires_explicit_push_or_merge_authorization_even_with_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            _init_git_repo(root, branch="feature/demo")
+            transcript = _write_transcript(root, "同步完成，继续验证")
+            _write_merge_safety_state(
+                root,
+                operation="push",
+                target_ref="master",
+                source_ref="HEAD",
+                precheck_ok=True,
+                validation_ok=True,
+                review_ok=True,
+                lineage_ok=True,
+                postcheck_ok=True,
+            )
+
+            blocked = _run_gate(
+                _payload(
+                    "git push origin HEAD:master",
+                    cwd=root,
+                    transcript_path=str(transcript),
+                )
+            )
+
+            self.assertEqual(blocked.get("decision"), "block", blocked)
+            self.assertIn("authorization", str(blocked.get("reason", "")).lower())
+
     def test_protected_push_accepts_plan_approval_with_common_typo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "repo"
@@ -458,6 +585,110 @@ class CriticalActionGateContractTests(unittest.TestCase):
 
             self.assertEqual(allowed.get("decision"), "allow")
             self.assertTrue(allowed.get("silent"), allowed)
+
+    def test_protected_push_accepts_explicit_merge_to_master_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            _init_git_repo(root, branch="sync-work")
+            transcript = _write_transcript(root, "合并到 master")
+            _write_merge_safety_state(
+                root,
+                operation="push",
+                target_ref="master",
+                source_ref="HEAD",
+                precheck_ok=True,
+                validation_ok=True,
+                review_ok=True,
+                lineage_ok=True,
+                postcheck_ok=True,
+            )
+
+            allowed = _run_gate(
+                _payload(
+                    "git push origin HEAD:master",
+                    cwd=root,
+                    transcript_path=str(transcript),
+                )
+            )
+
+            self.assertEqual(allowed.get("decision"), "allow", allowed)
+            self.assertTrue(allowed.get("silent"), allowed)
+
+    def test_protected_push_reads_session_context_when_transcript_path_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            _init_git_repo(root, branch="sync-work")
+            context_dir = root / "session-context"
+            context_dir.mkdir()
+            session_id = "session-test-1"
+            (context_dir / f"{session_id}.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "user_text": "授权，继续推进。",
+                        "assistant_text": (
+                            "请将当前分支快进推送到 master。已完成 validation review "
+                            "lineage post-check。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            _write_merge_safety_state(
+                root,
+                operation="push",
+                target_ref="master",
+                source_ref="HEAD",
+                precheck_ok=True,
+                validation_ok=True,
+                review_ok=True,
+                lineage_ok=True,
+                postcheck_ok=True,
+            )
+
+            allowed = _run_gate(
+                _payload(
+                    "git push origin HEAD:master",
+                    cwd=root,
+                    session_id=session_id,
+                ),
+                env={**os.environ, "CODEX_SESSION_CONTEXT_DIR": str(context_dir)},
+            )
+
+            self.assertEqual(allowed.get("decision"), "allow", allowed)
+            self.assertTrue(allowed.get("silent"), allowed)
+
+    def test_missing_merge_evidence_still_blocks_session_context_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            _init_git_repo(root, branch="sync-work")
+            context_dir = root / "session-context"
+            context_dir.mkdir()
+            session_id = "session-test-2"
+            (context_dir / f"{session_id}.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "user_text": "允许执行 git push origin HEAD:master，将 d507fdf 推送到 master。",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            blocked = _run_gate(
+                _payload(
+                    "git push origin HEAD:master",
+                    cwd=root,
+                    session_id=session_id,
+                ),
+                env={**os.environ, "CODEX_SESSION_CONTEXT_DIR": str(context_dir)},
+            )
+
+            self.assertEqual(blocked.get("decision"), "block", blocked)
+            for required in ("validation", "review", "lineage", "post-check"):
+                self.assertIn(required, str(blocked.get("reason", "")).lower())
 
     def test_protected_push_rejects_missing_or_mismatched_intent_even_with_complete_evidence(self) -> None:
         complete_evidence = {
@@ -1043,6 +1274,270 @@ class CriticalActionGateContractTests(unittest.TestCase):
                     self.assertNotIn("hash", rendered)
                     self.assertNotIn("token", rendered)
 
+    def test_configured_pre_and_test_routine_ssh_deploy_build_restart_do_not_require_current_turn_auth(self) -> None:
+        cases = (
+            "ssh app-pre-1 'cd /srv/example-app && git fetch origin && git checkout feature/demo && pnpm build && systemctl restart example-app'",
+            "ssh app-test-1 'cd /srv/example-app && git fetch origin && git checkout feature/demo && npm run build && supervisorctl restart example-app'",
+        )
+
+        for command in cases:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+
+                    result = _run_gate(_payload(command, cwd=root))
+
+                    self.assertEqual(result.get("decision"), "allow", result)
+                    self.assertTrue(result.get("silent"), result)
+
+    def test_configured_pre_and_test_routine_ssh_respects_current_user_denial(self) -> None:
+        cases = (
+            (
+                "denied_restart",
+                "ssh app-pre-1 'cd /srv/example-app && git fetch origin && git checkout feature/demo && systemctl restart example-app'",
+                "不要重启预发服务",
+            ),
+            (
+                "denied_ssh_transport",
+                "ssh app-test-1 'cd /srv/example-app && git fetch origin && git checkout feature/demo && supervisorctl restart example-app'",
+                "do not use ssh for test",
+            ),
+        )
+
+        for case_name, command, user_text in cases:
+            with self.subTest(case=case_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    transcript = _write_transcript(root, user_text)
+
+                    result = _run_gate(_payload(command, cwd=root, transcript_path=str(transcript)))
+
+                    self.assertEqual(result.get("decision"), "block", result)
+                    self.assertIn("current-turn", str(result.get("reason", "")).lower())
+
+    def test_configured_pre_and_test_nonroutine_git_reset_does_not_use_routine_ssh_shortcut(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            result = _run_gate(
+                _payload(
+                    "ssh app-pre-1 'cd /srv/example-app && git reset --hard origin/master && systemctl restart example-app'",
+                    cwd=root,
+                )
+            )
+
+            self.assertEqual(result.get("decision"), "block", result)
+            self.assertIn("may discard work", str(result.get("reason", "")).lower())
+
+    def test_real_pre_ssh_branch_sync_reset_restart_is_rejected_as_destructive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            command = """ssh aiserver-pre 'set -euo pipefail
+cd /opt/project/aiserver
+echo "pre_start_branch=$(git branch --show-current)"
+echo "pre_start_head=$(git rev-parse HEAD)"
+test -z "$(git status --porcelain=v1 --untracked-files=no)"
+git fetch origin
+git switch pre
+git reset --hard origin/pre
+expected_head=$(git rev-parse origin/pre)
+test "$(git branch --show-current)" = pre
+test "$(git rev-parse HEAD)" = "$expected_head"
+supervisorctl restart aiserver
+supervisorctl status aiserver
+test "$(git branch --show-current)" = pre
+test "$(git rev-parse HEAD)" = "$expected_head"
+curl -fsS --max-time 10 http://127.0.0.1:8001/healthz'"""
+
+            result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+
+            self.assertEqual(result.get("decision"), "block", result)
+            reason = str(result.get("reason", "")).lower()
+            self.assertIn("may discard work", reason)
+            self.assertNotIn("current-turn", reason)
+
+    def test_pre_ssh_embedded_hard_reset_is_technical_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            for prefix, git_prefix in (("", "git"), ("git fetch origin; ", "git"), ("", "git -C .")):
+                command = (
+                    "ssh aiserver-pre 'cd /opt/project/aiserver; " + prefix
+                    + "if " + git_prefix + " reset --hard origin/pre; then supervisorctl restart aiserver; fi'"
+                )
+                result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+                self.assertEqual(result.get("decision"), "block", result)
+                self.assertIn("may discard work", str(result.get("reason", "")))
+
+    def test_pre_sync_symbolic_ref_read_not_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            for probe, decision in (
+                ("symbolic-ref --short HEAD", "allow"),
+                ("symbolic-ref -q HEAD", "allow"),
+                ("symbolic-ref HEAD refs/heads/master", "block"),
+                ("symbolic-ref --delete HEAD", "block"),
+                ("symbolic-ref -m reason HEAD refs/heads/master", "block"),
+                ("ls-remote origin refs/heads/pre", "allow"),
+                ("ls-remote --upload-pack=evil origin", "block"),
+                ("ls-remote ext::evil", "block"),
+                ("-c protocol.ext.allow=always ls-remote ext::evil", "block"),
+                ("--exec-path=/tmp/evil ls-remote origin", "block"),
+                ("-c core.sshCommand=evil ls-remote origin", "block"),
+            ):
+                with self.subTest(probe=probe):
+                    command = "ssh aiserver-pre 'cd /opt/project/aiserver; git fetch origin pre; git merge --ff-only origin/pre; git " + probe + "; supervisorctl restart aiserver'"
+                    result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+                    self.assertEqual(result.get("decision"), decision, result)
+
+    def test_shared_pre_sync_on_test_host_allows_readonly_ancestry_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            policy = json.loads(policy_path.read_text())
+            policy["server_policy"]["hosts"]["pre"]["env"] = "test"
+            policy_path.write_text(json.dumps(policy))
+            command = "ssh aiserver-pre 'cd /opt/project/aiserver; git fetch origin pre; git merge-base --is-ancestor pre origin/pre; git switch pre; git merge --ff-only origin/pre; supervisorctl restart aiserver'"
+            result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+            self.assertEqual(result.get("decision"), "allow", result)
+            result = _run_gate(_payload(command.replace("merge --ff-only origin/pre", "merge --ff-only origin/master"), cwd=root, policy_path=str(policy_path)))
+            self.assertEqual(result.get("decision"), "block", result)
+
+    def test_pre_ssh_fast_forward_merge_restart_is_routine_when_policy_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            command = """ssh aiserver-pre 'set -euo pipefail
+cd /opt/project/aiserver
+git fetch origin
+git switch pre
+git merge --ff-only origin/pre
+supervisorctl restart aiserver
+supervisorctl status aiserver'"""
+
+            result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+
+            self.assertEqual(result.get("decision"), "allow", result)
+            self.assertTrue(result.get("silent"), result)
+
+    def test_pre_ssh_fast_forward_merge_allows_standard_readonly_git_probes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            command = """ssh aiserver-pre 'set -euo pipefail
+cd /opt/project/aiserver
+git status --short
+git rev-parse --verify HEAD
+git fetch origin
+git switch pre
+git merge --ff-only origin/pre
+supervisorctl restart aiserver'"""
+
+            result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+
+            self.assertEqual(result.get("decision"), "allow", result)
+            self.assertTrue(result.get("silent"), result)
+
+    def test_pre_ssh_reset_hard_wrong_ref_is_not_routine(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            command = """ssh aiserver-pre 'set -euo pipefail
+cd /opt/project/aiserver
+git fetch origin
+git switch pre
+git reset --hard origin/master
+supervisorctl restart aiserver'"""
+
+            result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+
+            self.assertEqual(result.get("decision"), "block", result)
+            self.assertIn("may discard work", str(result.get("reason", "")).lower())
+
+    def test_pre_ssh_branch_delete_is_not_treated_as_readonly_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_pre_policy(root)
+            command = """ssh aiserver-pre 'set -euo pipefail
+cd /opt/project/aiserver
+git fetch origin
+git switch pre
+git branch -D stale-branch
+git merge --ff-only origin/pre
+supervisorctl restart aiserver'"""
+
+            result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+
+            self.assertEqual(result.get("decision"), "block", result)
+            self.assertIn("routine", str(result.get("reason", "")).lower())
+
+    def test_configured_pre_and_test_routine_ssh_still_requires_app_and_service_bounds(self) -> None:
+        cases = (
+            (
+                "wrong_dir",
+                "ssh app-pre-1 'cd /tmp/example-app && git pull --ff-only && systemctl restart example-app'",
+            ),
+            (
+                "wrong_service",
+                "ssh app-test-1 'cd /srv/example-app && git pull --ff-only && systemctl restart other-app'",
+            ),
+        )
+
+        for case_name, command in cases:
+            with self.subTest(case=case_name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+
+                    result = _run_gate(_payload(command, cwd=root))
+
+                    self.assertEqual(result.get("decision"), "block", result)
+                    self.assertIn("bounds", str(result.get("reason", "")).lower())
+
+    def test_configured_pre_routine_ssh_accepts_exact_supervisor_group_service_with_colon(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy = json.loads(POLICY.read_text(encoding="utf-8"))
+            policy["server_policy"]["hosts"]["app-pre-1"]["allowed_app_dirs"] = ["/opt/project/midoo_pre"]
+            policy["server_policy"]["hosts"]["app-pre-1"]["services"] = ["midoo_pre:midoo_pre_api_app"]
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+            allowed = _run_gate(
+                _payload(
+                    "ssh app-pre-1 'cd /opt/project/midoo_pre && supervisorctl restart midoo_pre:midoo_pre_api_app'",
+                    cwd=root,
+                    policy_path=str(policy_path),
+                )
+            )
+            self.assertEqual(allowed.get("decision"), "allow", allowed)
+            self.assertTrue(allowed.get("silent"), allowed)
+
+            wrong_service = _run_gate(
+                _payload(
+                    "ssh app-pre-1 'cd /opt/project/midoo_pre && supervisorctl restart midoo_pre:other_app'",
+                    cwd=root,
+                    policy_path=str(policy_path),
+                )
+            )
+            self.assertEqual(wrong_service.get("decision"), "block", wrong_service)
+            self.assertIn("bounds", str(wrong_service.get("reason", "")).lower())
+
+    def test_prod_raw_ssh_routine_deploy_build_restart_still_requires_prod_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            result = _run_gate(
+                _payload(
+                    "ssh app-prod-1 'cd /srv/example-app && git pull --ff-only && pnpm build && systemctl restart example-app'",
+                    cwd=root,
+                )
+            )
+
+            self.assertEqual(result.get("decision"), "block", result)
+            self.assertIn("prodctl", str(result.get("reason", "")).lower())
+
     def test_server_policy_is_discovered_from_codex_home_without_payload_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1168,6 +1663,32 @@ class CriticalActionGateContractTests(unittest.TestCase):
 
             self.assertEqual(result.get("decision"), "allow")
             self.assertTrue(result.get("silent"), result)
+
+    def test_runtime_bash_payload_without_workdir_requires_explicit_git_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            outer = Path(temp_dir)
+            session_repo = outer / "session-repo"
+            checked_repo = outer / "checked repo"
+            _init_git_repo(session_repo)
+            _init_git_repo(checked_repo)
+            (checked_repo / "README.md").write_text("checked revision\n", encoding="utf-8")
+            _run(["git", "add", "README.md"], checked_repo)
+            _run(["git", "commit", "-m", "checked revision"], checked_repo)
+            head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checked_repo, text=True).strip()
+            _write_merge_safety_state(checked_repo, target_ref="test", source_ref="HEAD", operation="push",
+                                     validation_ok=True, review_ok=True, lineage_ok=True, postcheck_ok=True)
+            transcript = _write_transcript_records(outer, [
+                _message("assistant", f"将已验证提交 {head} 推送到 origin/test，仅推送，不部署。"),
+                _message("user", "授权，继续。"),
+            ])
+            payload = _payload("", cwd=session_repo, transcript_path=str(transcript))
+            # Actual runtime bridge emits Bash/command and drops exec_command.workdir.
+            payload["tool_input"] = {"command": "git push origin HEAD:test"}
+            self.assertEqual(_run_gate(payload).get("decision"), "block")
+            payload["tool_input"] = {"command": f'git -C "{checked_repo}" push origin HEAD:test'}
+            self.assertEqual(_run_gate(payload).get("decision"), "allow")
+            payload["tool_input"] = {"command": f'git -C "{checked_repo}" push --force origin HEAD:test'}
+            self.assertEqual(_run_gate(payload).get("decision"), "block")
 
     def test_implicit_push_with_config_derived_scope_requires_explicit_refspec(self) -> None:
         cases = (
@@ -1369,6 +1890,19 @@ class CriticalActionGateContractTests(unittest.TestCase):
                     self.assertEqual(result.get("decision"), "allow")
                     self.assertTrue(result.get("silent"), result)
 
+    def test_compound_push_does_not_treat_later_command_as_refspec(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "repo"
+            _init_git_repo(root, branch="feature/demo")
+            for separator in (";", "&&", "\n"):
+                command = f'git -C {root} push origin HEAD:refs/heads/feature/demo {separator} git status --short'
+                result = _run_gate(_payload(command, cwd=root))
+                self.assertEqual(result.get("decision"), "allow", result)
+            blocked = _run_gate(_payload(
+                'git push origin HEAD:feature/demo; git push origin HEAD:master', cwd=root,
+            ))
+            self.assertEqual(blocked.get("decision"), "block", blocked)
+
     def test_approved_predeploy_journey_authorizes_protected_push_without_repeating_sha(self) -> None:
         assistant_plan = (
             "我的预发计划是：\n"
@@ -1484,7 +2018,7 @@ class CriticalActionGateContractTests(unittest.TestCase):
 
             self.assertEqual(result.get("decision"), "block")
 
-    def test_adjacent_push_plan_with_explicit_sha_cannot_authorize_a_different_source(self) -> None:
+    def test_pretest_push_uses_matching_merge_safety_evidence_even_if_adjacent_plan_names_other_sha(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "repo"
             _init_git_repo(root, branch="integration/prebuilt")
@@ -1517,9 +2051,10 @@ class CriticalActionGateContractTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(result.get("decision"), "block")
+            self.assertEqual(result.get("decision"), "allow", result)
+            self.assertTrue(result.get("silent"), result)
 
-    def test_adjacent_push_plan_with_named_source_cannot_authorize_a_different_source(self) -> None:
+    def test_pretest_push_uses_matching_merge_safety_evidence_even_if_adjacent_plan_names_other_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "repo"
             _init_git_repo(root, branch="feature/other")
@@ -1550,7 +2085,8 @@ class CriticalActionGateContractTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(result.get("decision"), "block", result)
+            self.assertEqual(result.get("decision"), "allow", result)
+            self.assertTrue(result.get("silent"), result)
 
     def test_adjacent_push_plan_with_named_source_authorizes_that_exact_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1807,6 +2343,196 @@ class CriticalActionGateContractTests(unittest.TestCase):
                     self.assertEqual(result.get("decision"), "allow", result)
                     self.assertTrue(result.get("silent"), result)
 
+    def test_real_predeploy_authorization_word_covers_deploy_and_restart_service(self) -> None:
+        assistant_plan = (
+            "预发集成已成功。请授权在 pre 环境使用受控 prodctl 将 aiserver "
+            "从 51b3a24cd1fbe0d1f4be4614160d5fc592a8b72c 切换到 "
+            "657189510e6f62dcad8976422b6bc6ebde85acc3，并重启一次服务进行验证。"
+        )
+        commands = (
+            "./prodctl deploy --host pre --ref 657189510e6f62dcad8976422b6bc6ebde85acc3",
+            "./prodctl restart-service --host pre --service aiserver",
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    policy_path = _write_aiserver_policy(root)
+                    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+                    policy["server_policy"]["hosts"]["pre"] = dict(
+                        policy["server_policy"]["hosts"]["app-pre-1"]
+                    )
+                    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+                    transcript = _write_transcript_records(
+                        root,
+                        [
+                            _message("assistant", assistant_plan),
+                            _message("user", "授权\n然后测试验证"),
+                        ],
+                    )
+
+                    result = _run_gate(
+                        _payload(
+                            command,
+                            cwd=root,
+                            policy_path=str(policy_path),
+                            transcript_path=str(transcript),
+                        )
+                    )
+
+                    self.assertEqual(result.get("decision"), "allow", result)
+                    self.assertTrue(result.get("silent"), result)
+
+    def test_natural_predeploy_intent_covers_deploy_and_restart_without_command_copy(self) -> None:
+        assistant_plan = (
+            "预发集成已成功。接下来把 aiserver 上到 pre，重启一次并做健康检查。"
+            "命令：./prodctl deploy --host pre --service aiserver --ref 6571895；"
+            "./prodctl restart-service --host pre --service aiserver。"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_policy(root)
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            policy["server_policy"]["hosts"]["pre"] = dict(
+                policy["server_policy"]["hosts"]["app-pre-1"]
+            )
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            transcript = _write_transcript_records(
+                root,
+                [_message("assistant", assistant_plan), _message("user", "上预发验证")],
+            )
+            for command in (
+                "./prodctl deploy --host pre --service aiserver --ref 6571895",
+                "./prodctl restart-service --host pre --service aiserver",
+            ):
+                with self.subTest(command=command):
+                    result = _run_gate(
+                        _payload(
+                            command,
+                            cwd=root,
+                            policy_path=str(policy_path),
+                            transcript_path=str(transcript),
+                        )
+                    )
+                    self.assertEqual(result.get("decision"), "allow", result)
+                    self.assertTrue(result.get("silent"), result)
+
+    def test_natural_test_intent_covers_deploy_and_restart_without_command_copy(self) -> None:
+        assistant_plan = (
+            "测试环境验证：把 aiserver 部署到 test，重启后跑健康检查。"
+            "命令：./prodctl deploy --host test --service aiserver --ref abc1234；"
+            "./prodctl restart-service --host test --service aiserver。"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_policy(root)
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            policy["server_policy"]["hosts"]["test"] = dict(
+                policy["server_policy"]["hosts"]["app-test-1"]
+            )
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            transcript = _write_transcript_records(
+                root,
+                [_message("assistant", assistant_plan), _message("user", "上 test 验证")],
+            )
+            for command in (
+                "./prodctl deploy --host test --service aiserver --ref abc1234",
+                "./prodctl restart-service --host test --service aiserver",
+            ):
+                with self.subTest(command=command):
+                    result = _run_gate(
+                        _payload(
+                            command,
+                            cwd=root,
+                            policy_path=str(policy_path),
+                            transcript_path=str(transcript),
+                        )
+                    )
+                    self.assertEqual(result.get("decision"), "allow", result)
+                    self.assertTrue(result.get("silent"), result)
+
+    def test_one_plan_can_cover_test_and_pre_with_short_followup(self) -> None:
+        assistant_plan = (
+            "计划：先把当前版本部署到 test 并重启验证，再把同一版本部署到 pre 并重启验证。"
+            "使用受控 prodctl，命令为 ./prodctl deploy --host test --service aiserver --ref abc1234；"
+            "./prodctl restart-service --host test --service aiserver；"
+            "./prodctl deploy --host pre --service aiserver --ref abc1234；"
+            "./prodctl restart-service --host pre --service aiserver。完成后做健康检查。"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_policy(root)
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            policy["server_policy"]["hosts"]["test"] = dict(
+                policy["server_policy"]["hosts"]["app-test-1"]
+            )
+            policy["server_policy"]["hosts"]["pre"] = dict(
+                policy["server_policy"]["hosts"]["app-pre-1"]
+            )
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            transcript = _write_transcript_records(
+                root,
+                [_message("assistant", assistant_plan), _message("user", "按照规划推进吧")],
+            )
+            commands = (
+                "./prodctl deploy --host test --service aiserver --ref abc1234",
+                "./prodctl restart-service --host test --service aiserver",
+                "./prodctl deploy --host pre --service aiserver --ref abc1234",
+                "./prodctl restart-service --host pre --service aiserver",
+            )
+            for command in commands:
+                with self.subTest(command=command):
+                    result = _run_gate(
+                        _payload(
+                            command,
+                            cwd=root,
+                            policy_path=str(policy_path),
+                            transcript_path=str(transcript),
+                        )
+                    )
+                    self.assertEqual(result.get("decision"), "allow", result)
+                    self.assertTrue(result.get("silent"), result)
+
+    def test_predeploy_plan_survives_interleaved_runtime_messages(self) -> None:
+        assistant_plan = (
+            "预发集成已成功。请授权在 pre 环境使用受控 prodctl 将 aiserver "
+            "切换到 6571895，并重启一次服务进行验证。"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_policy(root)
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            policy["server_policy"]["hosts"]["pre"] = dict(
+                policy["server_policy"]["hosts"]["app-pre-1"]
+            )
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            transcript = _write_transcript_records(
+                root,
+                [
+                    _message("assistant", assistant_plan),
+                    {"payload": {"type": "message", "role": "developer", "content": "runtime note"}},
+                    {"payload": {"type": "item_completed", "item": {"type": "tool_call"}}},
+                    _message("user", "授权，继续推进"),
+                ],
+            )
+
+            for command in (
+                "./prodctl deploy --host pre --ref 6571895",
+                "./prodctl restart-service --host pre --service aiserver",
+            ):
+                with self.subTest(command=command):
+                    result = _run_gate(
+                        _payload(
+                            command,
+                            cwd=root,
+                            policy_path=str(policy_path),
+                            transcript_path=str(transcript),
+                        )
+                    )
+                    self.assertEqual(result.get("decision"), "allow", result)
+                    self.assertTrue(result.get("silent"), result)
+
     def test_approved_deploy_plan_that_excludes_restart_cannot_authorize_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1934,7 +2660,7 @@ class CriticalActionGateContractTests(unittest.TestCase):
 
             self.assertEqual(result.get("decision"), "block")
 
-    def test_adjacent_single_service_plan_cannot_authorize_an_extra_ssh_service(self) -> None:
+    def test_configured_pre_routine_ssh_can_restart_multiple_configured_services_without_repeated_language(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             policy = json.loads(POLICY.read_text(encoding="utf-8"))
@@ -1958,7 +2684,8 @@ class CriticalActionGateContractTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(result.get("decision"), "block")
+            self.assertEqual(result.get("decision"), "allow", result)
+            self.assertTrue(result.get("silent"), result)
 
     def test_english_current_turn_negation_cannot_approve_adjacent_restart_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2200,24 +2927,12 @@ class CriticalActionGateContractTests(unittest.TestCase):
                     self.assertEqual(result.get("decision"), "block")
                     self.assertIn(reason_marker, str(result.get("reason", "")).lower())
 
-    def test_negated_adjacent_plan_scope_cannot_authorize_transport_service_or_git(self) -> None:
+    def test_negated_adjacent_plan_scope_still_blocks_prodctl_semantic_authorization(self) -> None:
         cases = (
-            (
-                "negated_ssh_transport",
-                "Plan: restart aiserver on pre host app-pre-1 using prodctl only. Do not use ssh.",
-                "ssh app-pre-1 'cd /opt/project/aiserver && supervisorctl restart aiserver'",
-                "current-turn",
-            ),
             (
                 "negated_service",
                 "Plan: do not restart aiserver; restart billing only on pre host app-pre-1 using prodctl.",
                 "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "negated_deploy",
-                "Plan: do not deploy; only inspect pre host app-pre-1 using ssh.",
-                "ssh app-pre-1 'cd /opt/project/aiserver && git fetch origin && git checkout feature/demo'",
                 "current-turn",
             ),
         )
@@ -2529,6 +3244,20 @@ class CriticalActionGateContractTests(unittest.TestCase):
                     self.assertNotIn("hash", rendered)
                     self.assertNotIn("token", rendered)
                     self.assertNotIn("plan-id", rendered)
+
+    def test_bounded_pre_and_test_prodctl_tokens_do_not_require_repeated_user_text(self) -> None:
+        cases = (
+            "./prodctl deploy --host app-pre-1 --service aiserver --ref abc1234 --approval-token bounded-pre",
+            "./prodctl restart-service --host app-test-1 --service aiserver --approval-token bounded-test",
+        )
+        for command in cases:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    policy_path = _write_aiserver_policy(root)
+                    result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path)))
+                    self.assertEqual(result.get("decision"), "allow", result)
+                    self.assertTrue(result.get("silent"), result)
 
     def test_prodctl_mutation_to_unknown_host_fails_closed_when_policy_has_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

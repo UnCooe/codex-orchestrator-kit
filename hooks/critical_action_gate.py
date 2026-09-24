@@ -16,6 +16,9 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SESSION_CONTEXT_DIR = Path(
+    os.environ.get("CODEX_SESSION_CONTEXT_DIR", "/Users/a123/.codex/hooks/logs/session_context")
+)
 DEFAULT_PROTECTED_REFS = ("pre", "test", "master", "main")
 DEFAULT_ENVIRONMENT_ALIASES = {
     "prod": ("prod", "production", "正式", "生产", "线上"),
@@ -24,8 +27,8 @@ DEFAULT_ENVIRONMENT_ALIASES = {
 }
 DEFAULT_ACTION_ALIASES = {
     "push": ("push", "推送", "推上去", "推到", "推倒"),
-    "deploy": ("deploy", "部署", "发布", "上线"),
-    "restart": ("restart", "重启", "重启服务"),
+    "deploy": ("deploy", "部署", "发布", "上线", "切换到", "切换版本"),
+    "restart": ("restart", "restart-service", "重启", "重启服务"),
     "rollback": ("rollback", "回滚"),
 }
 RISK_CANDIDATE_RE = re.compile(
@@ -63,6 +66,8 @@ def _payload_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
+        if value.get("type") in {"input_text", "output_text", "text"} and isinstance(value.get("text"), str):
+            return value["text"]
         return "\n".join(_payload_text(item) for item in value.values())
     if isinstance(value, list):
         return "\n".join(_payload_text(item) for item in value)
@@ -379,6 +384,11 @@ def _git_config_values(cwd: str | None, key: str) -> list[str]:
 def _git_commands(merge_guard: Any, command: str, base_cwd: str | None = None) -> list[tuple[str, list[str], str | None]]:
     parsed: list[tuple[str, list[str], str | None]] = []
     for statement in _candidate_statements(command, merge_guard):
+        # Candidate discovery includes both the full shell expression and its
+        # atomic statements. Only parse the latter as Git argv; otherwise a
+        # later command becomes a spurious push refspec.
+        if len(merge_guard._shell_statements(statement)) > 1:
+            continue
         try:
             tokens = shlex.split(statement, posix=True)
         except ValueError:
@@ -427,10 +437,36 @@ def _load_transcript_context(path: str | None) -> AuthorizationContext:
         candidate = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         if candidate.get("type") != "message":
             continue
+        if candidate.get("role") == "user" and "<hook_prompt" not in str(candidate.get("content", "")):
+            break
         if candidate.get("role") == "assistant":
             adjacent_assistant_text = _payload_text(candidate.get("content", "")).lower()
-        break
+            break
     return AuthorizationContext(current_user_text, adjacent_assistant_text)
+
+
+def _load_session_context(payload: dict[str, Any]) -> AuthorizationContext:
+    session_id = ""
+    for key in ("session_id", "thread_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            session_id = value.strip()
+            break
+    session_id = session_id or os.environ.get("CODEX_SESSION_ID", "").strip()
+    if not session_id:
+        return AuthorizationContext()
+    safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    path = SESSION_CONTEXT_DIR / f"{safe_id}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return AuthorizationContext()
+    if data.get("session_id") != session_id:
+        return AuthorizationContext()
+    return AuthorizationContext(
+        str(data.get("user_text") or "").lower(),
+        str(data.get("assistant_text") or "").lower(),
+    )
 
 
 def _load_transcript_text(path: str | None) -> str:
@@ -444,7 +480,11 @@ def _transcript_text(payload: dict[str, Any]) -> str:
 
 def _transcript_context(payload: dict[str, Any]) -> AuthorizationContext:
     path = payload.get("transcript_path")
-    return _load_transcript_context(path if isinstance(path, str) else None)
+    if isinstance(path, str) and path:
+        context = _load_transcript_context(path)
+        if context.current_user_text:
+            return context
+    return _load_session_context(payload)
 
 
 def _is_positive_plan_approval(text: str) -> bool:
@@ -473,15 +513,23 @@ def _is_positive_plan_approval(text: str) -> bool:
     )
     if any(marker in normalized for marker in negative):
         return False
+    if re.fullmatch(r"(?:可以|ok(?:ay)?)[\s，,]*开始(?:吧)?[。.!！]?", normalized):
+        return True
     if re.search(r"\b(?:no|without)\s+(?:push|deploy|deployment|restart|rollback|release|write)\b", normalized):
         return False
     if re.search(r"\b(?:approve|approved|authorize|authorized|proceed|yes)\b", normalized):
         return True
-    if any(marker in normalized for marker in ("允许", "同意", "批准")):
+    if any(marker in normalized for marker in ("允许", "同意", "批准", "授权")):
+        return True
+    if re.search(r"合(?:并到|入)\s*(?:origin/)?(?:master|main)\b", normalized):
         return True
     if re.search(r"(?:\bok(?:ay)?\b|可以|确认|好的?|没问题).{0,20}(?:按|按照).{0,20}(?:推进|执行|继续)", normalized):
         return True
+    if re.search(r"(?:按|按照)\s*(?:上述|这个|该|当前)?\s*规划\s*(?:推进|执行|继续)(?:吧|了)?$", normalized):
+        return True
     if re.search(r"(?:可以|确认|好的?|没问题|继续).{0,16}(?:按|执行|继续|重启|部署|发布|回滚)", normalized):
+        return True
+    if re.search(r"(?:上|推到|部署到|发布到)\s*(?:预发|预发布|pre|测试|test)(?:环境)?\s*(?:验证|测试|跑|吧|了)?$", normalized):
         return True
     if re.search(r"(?:推送|推上去|推到|推倒|推|部署|发布|重启|执行|继续)(?:吧|了)?$", normalized):
         return True
@@ -517,6 +565,7 @@ def _explicit_plan_refs(text: str) -> list[str]:
     refish_token = r"([A-Za-z0-9._-]+/[A-Za-z0-9._/-]+|[0-9a-fA-F]{7,40})"
     patterns = (
         rf"(?:^|\s)--ref(?:=|\s+){ref_token}(?=$|\s)",
+        rf"按正常\s*`?{ref_token}`?\s*路径同步",
         rf"(?:commit|sha|提交|版本)\s*(?:为|是|:|：|=)?\s*{ref_token}",
         rf"(?:from|source)\s+(?:branch|ref)\s+{ref_token}",
         rf"(?:deploy|push)\s+(?:the\s+)?(?:branch|ref|commit)\s+{ref_token}",
@@ -603,6 +652,20 @@ def _git_resolve_ref(cwd: str | None, ref: str) -> str:
 def _mentioned_server_scopes(policy: dict[str, Any], text: str) -> tuple[set[str], set[str]]:
     environment_text = re.sub(r"\b(?:origin|upstream)/[A-Za-z0-9._/-]+", " ", text, flags=re.IGNORECASE)
     environment_text = re.sub(r"\brefs/(?:heads|remotes)/[A-Za-z0-9._/-]+", " ", environment_text, flags=re.IGNORECASE)
+    # A plan often records excluded environments alongside the selected one.
+    # Do not turn "不会操作 test/pre" into a multi-environment authorization.
+    environment_text = re.sub(
+        r"(?:不会|不|未)\s*(?:操作|触碰|涉及|改动)\s*[^\n。；;]*",
+        " ",
+        environment_text,
+        flags=re.IGNORECASE,
+    )
+    # A completed validation result is not a request targeting the test fleet.
+    # Keep explicit '测试环境' and all other test mentions untouched.
+    environment_text = re.sub(
+        r"(^|[。；;\n])\s*(?:工具修复)?已通过测试(?:和复审)?(?=[，,。；;\n]|$)",
+        r"\1已完成验证", environment_text,
+    )
     environments = {
         canonical
         for canonical in DEFAULT_ENVIRONMENT_ALIASES
@@ -627,13 +690,47 @@ def _mentioned_server_hosts(text: str) -> set[str]:
     return hosts
 
 
+def _mentioned_policy_hosts(policy: dict[str, Any], text: str) -> set[str]:
+    """Resolve registered host names/aliases mentioned in a batch plan.
+
+    Command parsing only sees ``--host``/SSH argv.  Production rollout plans
+    commonly name a frozen host batch in prose (for example ``cn-sz1 → cn-sz8``).
+    Resolve those names against the loaded policy so the execution gate and the
+    planner use the same host vocabulary.
+    """
+    hosts = _server_section(policy).get("hosts")
+    if not isinstance(hosts, dict):
+        return set()
+    found: set[str] = set()
+    normalized = text.lower()
+    for canonical, candidate in hosts.items():
+        if not isinstance(candidate, dict):
+            continue
+        canonical_name = str(canonical)
+        # ``pre host`` and ``test environment`` mention an environment, not a
+        # host whose canonical key happens to be ``pre``/``test``.
+        names = [] if canonical_name.lower() in DEFAULT_ENVIRONMENT_ALIASES else [canonical_name]
+        names.extend(str(item) for item in candidate.get("aliases") or [])
+        names.extend(str(item) for item in candidate.get("ssh_aliases") or [])
+        if any(re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(name.lower())}(?![A-Za-z0-9_.-])", normalized) for name in names if name):
+            found.add(str(canonical))
+    return found
+
+
+def _is_batch_rollout_plan(text: str, hosts: set[str]) -> bool:
+    if len(hosts) < 2:
+        return False
+    normalized = text.lower()
+    return any(marker in normalized for marker in ("按顺序", "依次", "逐台", "批量", "全部", "滚动", "→", "->"))
+
+
 def _mentioned_server_services(text: str) -> set[str]:
     services: set[str] = set()
     patterns = (
-        r"(?:^|\s)--service(?:=|\s+)([A-Za-z0-9_.@-]+)",
-        r"\bsystemctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@-]+)",
-        r"\bservice\s+([A-Za-z0-9_.@-]+)\s+(?:restart|start|stop|reload)\b",
-        r"\bsupervisorctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@-]+)",
+        r"(?:^|\s)--service(?:=|\s+)([A-Za-z0-9_.@:-]+)",
+        r"\bsystemctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@:-]+)",
+        r"\bservice\s+([A-Za-z0-9_.@:-]+)\s+(?:restart|start|stop|reload)\b",
+        r"\bsupervisorctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@:-]+)",
     )
     for pattern in patterns:
         services.update(match.group(1).lower() for match in re.finditer(pattern, text, re.IGNORECASE))
@@ -661,17 +758,41 @@ def _server_authorization_text(
         return current
 
     mentioned_envs, mentioned_actions = _mentioned_server_scopes(policy, plan)
+    if not mentioned_envs and host:
+        # A registered, uniquely named host already has a policy environment.
+        # Do not require the user/plan to spell the environment a second time.
+        named_hosts = {
+            name: _server_policy(policy, name)
+            for name in _server_section(policy).get("hosts", {})
+            if _host_authorized(policy, name, _server_policy(policy, name), plan)
+        }
+        selected = _server_policy(policy, host)
+        if len(named_hosts) == 1 and selected.get("_canonical_host") in named_hosts:
+            declared_env = str(selected.get("env", ""))
+            if declared_env in DEFAULT_ENVIRONMENT_ALIASES:
+                mentioned_envs = {declared_env}
     expected_actions = {
         "deploy" if action == "git" else action
         for action in actions
         if action == "git" or action in DEFAULT_ACTION_ALIASES
     }
-    if mentioned_envs != {environment} or not expected_actions.issubset(mentioned_actions):
+    if environment not in mentioned_envs or not expected_actions.issubset(mentioned_actions):
+        return current
+    if len(mentioned_envs) > 1 and not re.search(
+        rf"--host(?:=|\s+)\S*{re.escape(environment)}\b",
+        plan,
+        re.IGNORECASE,
+    ):
         return current
 
-    mentioned_hosts = _mentioned_server_hosts(plan)
-    if mentioned_hosts and (not host or mentioned_hosts != {host}):
-        return current
+    mentioned_hosts = _mentioned_server_hosts(plan) | _mentioned_policy_hosts(policy, plan)
+    batch_plan = _is_batch_rollout_plan(plan, mentioned_hosts)
+    if mentioned_hosts:
+        if len(mentioned_envs) > 1:
+            if not host or host not in mentioned_hosts:
+                return current
+        elif not host or (mentioned_hosts != {host} and not (environment == "prod" and batch_plan and host in mentioned_hosts)):
+            return current
     if host:
         host_policy = _server_policy(policy, host)
         if host_policy and not _host_authorized(policy, host, host_policy, plan):
@@ -681,7 +802,18 @@ def _server_authorization_text(
     if mentioned_services and mentioned_services != expected_services:
         return current
     if any(item not in plan for item in expected_services):
-        return current
+        # For non-production validation, a single service on the selected host
+        # is enough to bind the plan. Production keeps the stricter explicit
+        # service requirement.
+        host_services = [str(item).lower() for item in (host_policy.get("services") or [])] if host else []
+        batch_service_allowed = batch_plan and expected_services.issubset(set(host_services))
+        if not batch_service_allowed and (
+            environment == "prod"
+            or len(host_services) != 1
+            or expected_services != set(host_services)
+            or any(marker in plan.lower() for marker in ("only", "仅", "只", "不要", "不重启", "不部署"))
+        ):
+            return current
 
     transports = {name for name in ("prodctl", "ssh") if _text_has_alias(plan, [name])}
     if transports and transport not in transports:
@@ -698,6 +830,7 @@ def _server_authorization_text(
             clause
             for clause in _positive_plan_clauses(raw_plan)
             if any(_text_has_alias(clause, _aliases(policy, "action", action)) for action in expected_actions)
+            or ("deploy" in expected_actions and "路径同步" in clause)
         ]
         explicit_refs = _explicit_plan_refs("\n".join(action_clauses))
         if explicit_refs and not any(_ref_matches(ref, expected) for expected in explicit_refs):
@@ -806,7 +939,34 @@ def _evidence_ok(state: dict[str, Any], name: str) -> bool:
     return False
 
 
-def _matches_intent(state: dict[str, Any], *, target: str, source: str, operation: str) -> bool:
+def _pretest_checked_result_source_ok(state: dict[str, Any], *, target: str, source: str, cwd: str | None) -> bool:
+    if _ref_name(target) not in {"pre", "test"}:
+        return False
+    postcheck = state.get("last_post_check")
+    if not isinstance(postcheck, dict) or postcheck.get("ok") is not True:
+        return False
+    recorded_head = str(postcheck.get("current_head") or "").strip()
+    if not recorded_head or _git_resolve_ref(cwd, "HEAD") != recorded_head:
+        return False
+    if _git_resolve_ref(cwd, source) != recorded_head:
+        return False
+    lineage = postcheck.get("lineage")
+    if not isinstance(lineage, dict):
+        return False
+    source_in_result = lineage.get("source_in_result")
+    if not isinstance(source_in_result, dict) or source_in_result.get("ok") is not True:
+        return False
+    result_oid = str(source_in_result.get("result_oid") or "").strip()
+    if not result_oid or result_oid != recorded_head:
+        return False
+    required_ref = str(source_in_result.get("required_ref") or "").strip()
+    state_source = str(state.get("source_ref") or "").strip()
+    if not required_ref or _ref_name(required_ref) != _ref_name(state_source):
+        return False
+    return True
+
+
+def _matches_intent(state: dict[str, Any], *, target: str, source: str, operation: str, cwd: str | None = None) -> bool:
     if state.get("kind") != "merge_safety_intent":
         return False
     state_operation = str(state.get("operation") or "").strip()
@@ -817,9 +977,37 @@ def _matches_intent(state: dict[str, Any], *, target: str, source: str, operatio
     if not state_target or not state_source:
         return False
     target_ok = state_target == _ref_name(target)
-    source_ok = state_source == _ref_name(source)
+    source_ok = state_source == _ref_name(source) or _pretest_checked_result_source_ok(
+        state,
+        target=target,
+        source=source,
+        cwd=cwd,
+    )
     operation_ok = state_operation == operation
     return target_ok and source_ok and operation_ok
+
+
+def _protected_push_missing_requirements(
+    state: dict[str, Any],
+    *,
+    target: str,
+    source: str,
+    cwd: str | None = None,
+) -> list[str]:
+    checked_result_source_ok = _pretest_checked_result_source_ok(state, target=target, source=source, cwd=cwd)
+    missing = [
+        label
+        for label, key in (
+            ("validation", "validation"),
+            ("review", "review"),
+            ("lineage", "lineage"),
+            ("post-check", "postcheck"),
+        )
+        if not (key == "lineage" and checked_result_source_ok) and not _evidence_ok(state, key)
+    ]
+    if not _matches_intent(state, target=target, source=source, operation="push", cwd=cwd):
+        missing.append("matching intent")
+    return missing
 
 
 def _target_from_transcript(text: str, patterns: list[str]) -> str:
@@ -984,7 +1172,10 @@ def _mentions_current_branch(text: str) -> bool:
 
 def _push_authorized(text: str, args: list[str], *, cwd: str | None = None, protected_targets: list[str] | None = None) -> bool:
     ref_text = " ".join(_push_refspecs(args) + _push_targets(args) + _push_sources(args)).lower()
-    push_word = bool(re.search(r"\bpush\b|推送|推上去|推到|推倒|推吧", text, re.IGNORECASE))
+    push_word = bool(
+        re.search(r"\bpush\b|推送|推上去|推到|推倒|推吧", text, re.IGNORECASE)
+        or re.search(r"合(?:并到|入)\s*(?:origin/)?(?:master|main)\b", text, re.IGNORECASE)
+    )
     if not push_word:
         return False
     if not _push_refspecs(args):
@@ -1238,8 +1429,16 @@ def _remote_write_actions(remote: str) -> list[str]:
     actions: list[str] = []
     lower = remote.lower()
     lower_without_devnull_redirects = re.sub(r"(?<![<])(?:\b\d+)?>{1,2}\s*/dev/null\b", "", lower)
-    if re.search(r"\bgit\s+(?:fetch|pull|checkout|switch|merge|rebase|cherry-pick|reset)\b", lower):
+    # Duplicating an existing standard descriptor is not a filesystem write.
+    lower_without_devnull_redirects = re.sub(r"(?<![\w])(?:[012])?>&[012](?![\w])", "", lower_without_devnull_redirects)
+    if re.search(
+        r"\bgit\s+(?:fetch|pull|checkout|switch|merge|rebase|cherry-pick|reset)\b"
+        r"|\bgit\s+branch\s+(?:-[A-Za-z]*[dD][A-Za-z]*|--delete\b)",
+        lower,
+    ):
         actions.append("git")
+    if re.search(r"\b(?:pnpm|npm|yarn)\s+(?:run\s+)?build\b", lower):
+        actions.append("build")
     if re.search(
         r"\bsystemctl\s+(?:restart|start|stop|reload)\b"
         r"|\bservice\s+\S+\s+(?:restart|start|stop|reload)\b"
@@ -1289,11 +1488,11 @@ def _remote_cd_dir(remote: str) -> str:
 
 def _remote_services(remote: str) -> list[str]:
     services: list[str] = []
-    for match in re.finditer(r"\bsystemctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@-]+)", remote):
+    for match in re.finditer(r"\bsystemctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@:-]+)", remote):
         services.append(match.group(1))
-    for match in re.finditer(r"\bservice\s+([A-Za-z0-9_.@-]+)\s+(?:restart|start|stop|reload)\b", remote):
+    for match in re.finditer(r"\bservice\s+([A-Za-z0-9_.@:-]+)\s+(?:restart|start|stop|reload)\b", remote):
         services.append(match.group(1))
-    for match in re.finditer(r"\bsupervisorctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@-]+)", remote):
+    for match in re.finditer(r"\bsupervisorctl\s+(?:restart|start|stop|reload)\s+([A-Za-z0-9_.@:-]+)", remote):
         services.append(match.group(1))
     return services
 
@@ -1664,7 +1863,7 @@ def _remote_mutation_bounds(remote: str, allowed_app_dirs: list[Any], allowed_se
             continue
         command = Path(tokens[0]).name
         segment_actions = _remote_write_actions(segment)
-        if "git" in segment_actions or "restart" in segment_actions:
+        if {"build", "git", "restart"}.intersection(segment_actions):
             if not _remote_path_allowed(cwd, allowed_dirs):
                 return False
             if not _services_allowed(_remote_services(segment), allowed_services):
@@ -1681,6 +1880,123 @@ def _remote_mutation_bounds(remote: str, allowed_app_dirs: list[Any], allowed_se
             if not normalized or not _remote_path_allowed(normalized, allowed_dirs):
                 return False
     return True
+
+
+def _remote_git_invocations(remote: str) -> list[tuple[str, list[str]]]:
+    invocations: list[tuple[str, list[str]]] = []
+    for segment in _remote_shell_segments(remote):
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            continue
+        tokens = _strip_remote_prefixes(tokens)
+        if not tokens or Path(tokens[0]).name != "git":
+            continue
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"-C", "-c", "--git-dir", "--work-tree"} and index + 1 < len(tokens):
+                index += 2
+                continue
+            if token.startswith("-"):
+                index += 1
+                continue
+            args = tokens[index + 1 :]
+            if token in {"symbolic-ref", "ls-remote"} and index != 1:
+                # Global options can redirect execution/configuration. Do not
+                # erase them when classifying these newly admitted probes.
+                args = ["--unvalidated-global-options", *args]
+            invocations.append((token, args))
+            break
+    return invocations
+
+
+def _remote_git_subcommands(remote: str) -> list[str]:
+    subcommands: list[str] = []
+    for subcommand, _ in _remote_git_invocations(remote):
+        subcommands.append(subcommand)
+    return subcommands
+
+
+def _pretest_readonly_git_probe(subcommand: str, args: list[str], env: str) -> bool:
+    if subcommand == "symbolic-ref":
+        # One ref operand queries; a second operand or -d/-m mutates it.
+        flags = {"--short", "-q", "--quiet", "--no-recurse", "--recurse"}
+        operands = [arg for arg in args if arg not in flags]
+        return len(operands) == 1 and bool(operands[0]) and not operands[0].startswith("-")
+    if subcommand == "ls-remote":
+        # Ordinary ref inspection only; do not admit custom upload-pack commands.
+        flags = {"--heads", "--tags", "--refs", "--exit-code", "--symref", "-q", "--quiet"}
+        operands = [arg for arg in args if arg not in flags]
+        return bool(operands) and operands[0] in {"origin", "upstream"} and all(arg and not arg.startswith("-") for arg in operands)
+    if subcommand == "branch":
+        return args in ([], ["--show-current"], ["--list"])
+    if subcommand in {"rev-parse", "status", "merge-base"}:
+        return True
+    return False
+
+
+def _pretest_routine_git_invocation(subcommand: str, args: list[str], env: str) -> bool:
+    if _pretest_readonly_git_probe(subcommand, args, env):
+        return True
+    if subcommand in {"checkout", "fetch", "switch"}:
+        return True
+    if subcommand == "merge":
+        # Host classification is not a branch name: a test machine may host
+        # the project's shared pre checkout in its configured app directory.
+        return args in (["--ff-only", "origin/pre"], ["--ff-only", "origin/test"])
+    return False
+
+
+def _pretest_nonroutine_git_reason(remote: str, env: str) -> str:
+    # Risk detection must also cover shell control constructs which the narrow
+    # routine-command parser does not interpret (for example `if git reset`).
+    if re.search(r"\bgit\s+(?:[^\n;&|]*\s)?reset\b[^\n;&|]*--hard\b", remote):
+        return "reset --hard may discard work; use non-destructive shared-branch synchronization or explicitly assess destructive exception"
+    git_invocations = _remote_git_invocations(remote)
+    for subcommand, args in git_invocations:
+        if subcommand == "reset" and "--hard" in args:
+            return "reset --hard may discard work; use non-destructive shared-branch synchronization or explicitly assess destructive exception"
+    for subcommand, args in git_invocations:
+        if not _pretest_routine_git_invocation(subcommand, args, env):
+            return f"git {subcommand} is outside routine nonproduction branch sync bounds"
+    return ""
+
+
+def _pretest_routine_ssh_actions(actions: list[str], remote: str, env: str) -> bool:
+    if not actions or not set(actions).issubset({"build", "git", "restart"}):
+        return False
+    git_invocations = _remote_git_invocations(remote)
+    if "git" in actions:
+        return bool(git_invocations) and all(
+            _pretest_routine_git_invocation(subcommand, args, env) for subcommand, args in git_invocations
+        )
+    return not git_invocations
+
+
+def _current_text_denies_server_action(text: str, actions: list[str], *, transport: str = "") -> bool:
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    if not normalized:
+        return False
+    negative = r"(?:不要|不能|不可|禁止|先别|别|不执行|do not|don't|must not|never|no)"
+
+    def denied_near(terms: tuple[str, ...]) -> bool:
+        term_pattern = "|".join(re.escape(term) for term in terms)
+        return bool(
+            re.search(rf"{negative}[^。；;,.!?\n]{{0,24}}(?:{term_pattern})", normalized)
+            or re.search(rf"(?:{term_pattern})[^。；;,.!?\n]{{0,24}}{negative}", normalized)
+        )
+
+    if transport and denied_near((transport,)):
+        return True
+    action_terms = {
+        "build": ("build", "构建", "编译"),
+        "git": ("git", "deploy", "部署", "发布", "上线", "更新代码", "拉取代码", "切换分支"),
+        "restart": ("restart", "重启", "reload", "启动", "停止"),
+    }
+    if any(denied_near(action_terms.get(action, (action,))) for action in actions):
+        return True
+    return denied_near(("execute", "执行", "计划"))
 
 
 def _handle_ssh(
@@ -1745,6 +2061,15 @@ def _handle_ssh(
         if env in {"pre", "test"}:
             if not bounded:
                 return False, f"{env} SSH write to {host} is outside the configured app directory or service bounds"
+            nonroutine_git_reason = _pretest_nonroutine_git_reason(remote, env)
+            if nonroutine_git_reason:
+                return False, f"{env} SSH write to {host} {nonroutine_git_reason}"
+            if _pretest_routine_ssh_actions(actions, remote, env) and not _current_text_denies_server_action(
+                transcript_text(),
+                actions,
+                transport="ssh",
+            ):
+                continue
             action_ok = all(_action_authorized(policy, transcript, action) for action in actions)
             env_ok = _text_has_alias(transcript, _aliases(policy, "env", env))
             host_ok = _host_authorized(policy, host, host_policy, transcript) or env_ok
@@ -1791,6 +2116,8 @@ def _prodctl_invocations(command: str) -> list[tuple[str, list[str]]]:
     except Exception:
         merge_guard = None
     for statement in _candidate_statements(command, merge_guard):
+        if merge_guard and len(merge_guard._shell_statements(statement)) > 1:
+            continue
         try:
             tokens = shlex.split(statement, posix=True)
         except ValueError:
@@ -1802,6 +2129,26 @@ def _prodctl_invocations(command: str) -> list[tuple[str, list[str]]]:
         subcommand = tokens[1] if len(tokens) > 1 else ""
         invocations.append((subcommand, tokens[2:]))
     return invocations
+
+
+def _restart_preview(args: list[str]) -> bool:
+    # Only the audited restart clients are covered. Never treat an arbitrary
+    # command containing the words dry-run (or an option value) as read-only.
+    valued = {'--fleet', '--host', '--service', '--approval-token', '--net'}
+    index = 0
+    preview = False
+    while index < len(args):
+        arg = args[index]
+        if arg == '--dry-run':
+            preview = True
+            index += 1
+        elif arg in valued and index + 1 < len(args):
+            index += 2
+        elif any(arg.startswith(option + '=') for option in valued):
+            index += 1
+        else:
+            return False
+    return preview
 
 
 def _option_value(args: list[str], *names: str) -> str:
@@ -1859,9 +2206,17 @@ def _handle_prodctl(
         host, host_policy = _prodctl_host_policy(policy, args)
         if host and _policy_has_hosts(policy) and not host_policy:
             return False, f"prodctl host {host} is not present in policy"
+        if subcommand in {'restart', 'restart-service'} and _restart_preview(args):
+            continue
         if env in {"prod", "pre", "test"}:
             service = _option_value(args, "--service")
             ref = _option_value(args, "--ref")
+            if env in {"pre", "test"} and _option_value(args, "--approval-token"):
+                allowed_services = {str(item).lower() for item in (host_policy.get("services") or [])}
+                if host_policy and (not service or service.lower() in allowed_services):
+                    # The controlled prodctl client already carries the bounded
+                    # plan token. Do not make the user restate a pre/test plan.
+                    continue
             transcript = server_transcript_text(
                 environment=env,
                 actions=[action],
@@ -1883,7 +2238,16 @@ def _handle_prodctl(
             if not (env_ok and host_ok and action_ok):
                 return False, f"prodctl {subcommand} requires current-turn authorization matching environment and action"
             if service and service.lower() not in transcript:
-                return False, f"prodctl {subcommand} requires current-turn authorization matching service"
+                host_services = [str(item).lower() for item in (host_policy.get("services") or [])]
+                batch_hosts = _mentioned_policy_hosts(policy, transcript)
+                batch_service_allowed = (
+                    env == "prod"
+                    and host in batch_hosts
+                    and _is_batch_rollout_plan(transcript, batch_hosts)
+                    and service.lower() in host_services
+                )
+                if not batch_service_allowed and (env == "prod" or len(host_services) != 1 or host_services[0] != service.lower()):
+                    return False, f"prodctl {subcommand} requires current-turn authorization matching service"
     return True, ""
 
 
@@ -1970,26 +2334,19 @@ def _handle_git(
                 return False, "--force-with-lease requires exact current-turn authorization"
             if len(protected) > 1:
                 return False, "protected push with multiple protected targets is blocked; use separate single-ref pushes"
-            if not _push_authorized(transcript, args, cwd=cwd, protected_targets=protected):
-                return False, "shell git push requires current-turn authorization"
+            protected_push_missing: list[str] = []
+            pretest_evidence_authorized = False
             if protected:
                 state = _load_state(cwd)
-                missing = [
-                    label
-                    for label, key in (
-                        ("validation", "validation"),
-                        ("review", "review"),
-                        ("lineage", "lineage"),
-                        ("post-check", "postcheck"),
-                    )
-                    if not _evidence_ok(state, key)
-                ]
                 source = sources[0] if sources else "HEAD"
                 target = protected[0]
-                if not _matches_intent(state, target=target, source=source, operation="push"):
-                    missing.append("matching intent")
-                if missing:
-                    return False, "protected push requires " + ", ".join(dict.fromkeys(missing))
+                protected_push_missing = _protected_push_missing_requirements(state, target=target, source=source, cwd=cwd)
+                pretest_evidence_authorized = _ref_name(target) in {"pre", "test"} and not protected_push_missing
+            if not _push_authorized(transcript, args, cwd=cwd, protected_targets=protected) and not pretest_evidence_authorized:
+                return False, "shell git push requires current-turn authorization"
+            if protected:
+                if protected_push_missing:
+                    return False, "protected push requires " + ", ".join(dict.fromkeys(protected_push_missing))
             continue
     return True, ""
 

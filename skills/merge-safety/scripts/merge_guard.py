@@ -1420,6 +1420,15 @@ def cmd_prepare_protected_sync(args: argparse.Namespace) -> int:
         _write_state(root, state)
     except Exception as exc:
         return _fail(str(exc))
+    push_target = _ref_name(target_ref)
+    if target_ref.startswith(("origin/", "refs/remotes/origin/")):
+        push_target = "refs/heads/" + push_target.removeprefix("origin/")
+    promotion_command = ""
+    if push_target.removeprefix("refs/heads/") in {"master", "main"}:
+        promotion_command = shlex.join([
+            "python", "scripts/promote_master.py", "--repo", str(root),
+            "--source-ref", source_ref, "--target", push_target.removeprefix("refs/heads/"), "--execute",
+        ])
     return _ok(
         "protected sync push state prepared",
         checked_root=str(root),
@@ -1427,7 +1436,8 @@ def cmd_prepare_protected_sync(args: argparse.Namespace) -> int:
         target_ref=target_ref,
         source_ref=source_ref,
         validated_ref=validated_ref,
-        push_command=f"git push origin {source_ref}:{_ref_name(target_ref)}",
+        push_command=shlex.join(["git", "-C", str(root), "push", "origin", f"{source_ref}:{push_target}"]),
+        promotion_command=promotion_command,
         forbidden_actions=["deploy", "restart", "force-push", "server-mutation"],
         post=details,
     )

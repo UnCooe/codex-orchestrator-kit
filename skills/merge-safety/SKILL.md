@@ -31,6 +31,7 @@ If `plan`, `status`, `report`, `check-pre`, or `check-post` returns `next_action
 ## Required Gates
 
 - Before any mutating merge/rebase/cherry-pick/pull-like integration: initialize intent with `init`, then run `check-pre` as a separate command.
+- Use `git -C <checked_root> ...` for the integration command itself, not only the final push. Take the absolute `checked_root` from the guard result; do not rely on terminal workdir or retry directory aliases when the hook cannot locate state.
 - After the merge result exists: record validation/review/subagent evidence with `record-evidence`, then run `check-post`.
 - For promotion of a pre-validated result to master/main or another protected target: record and check lineage with `record-lineage` / `check-lineage`.
 - Clear the active intent with `clear` when the merge is committed, abandoned, or handed off.
@@ -59,7 +60,23 @@ After the result commit exists and validation/review evidence is available, prep
 python scripts/merge_guard.py prepare-protected-sync --cwd /path/to/repo --target-ref master --source-ref HEAD --validated-ref <validated-ref> --test "<validation>" --review "<review>"
 ```
 
-Then run only the returned single-ref `git push` command after current-turn user approval. If `prepare-protected-sync` fails, follow its `next_action` and do not push.
+The returned `push_command` is a diagnostic description, not the master execution path. For `master`/`main`, use the project's registered promotion entrypoint. It may be repository-local or a managed tool explicitly selected by the project. Do not infer a missing repository script from a skill-relative example.
+
+For projects registered to use this skill's bundled promotion helper, resolve the following script relative to this SKILL file (not the project cwd):
+
+```bash
+python scripts/promote_master.py --repo /path/to/repo --source-ref HEAD --target master --execute
+```
+
+The bundled wrapper requires a passed `merge_guard.py` post-check, creates an ephemeral
+`integration/master/*` worktree, performs a non-force merge, and supplies the
+process-local contract expected by the repository Git guard for that one push.
+It does not deploy or restart anything. Do not replace it with ordinary
+`git push`, `COMPANY_GIT_GUARD_BYPASS`, or raw SSH. If the wrapper is missing or
+its preconditions fail, stop and repair the promotion path rather than asking
+the user to paste guard markers. A clear pre/test deployment request still
+covers its routine integration push; production/master approval remains
+explicit and is bound to the displayed checked plan.
 
 ## Agent Boundaries
 

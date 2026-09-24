@@ -1,17 +1,19 @@
 ---
 name: predeploy-workflow
-description: Use for predeploy, staging, rollback, release verification, deployment handoff, server write, restart, or environment mutation workflows; choose a semantic lane, require current-turn authorization for writes, and let project tooling provide deterministic plans and commands.
+description: Use for predeploy, staging, rollback, release verification, deployment handoff, server write, restart, or environment mutation workflows; interpret authorization and risk boundaries while adapting execution to the project's actual capabilities.
 ---
 
 # Predeploy Workflow
 
 Version: `predeploy-routing-v2.2-plan-scope`.
 
-Use this as a routing card, not a deploy runbook. The main agent interprets intent, calls the project predeploy/deploy planner, and follows that tool's machine-readable plan. Scripts, hooks, and project deploy tools own hard gates.
+Use this as a boundary guide, not a fixed deploy runbook. The main agent interprets intent and chooses an appropriate execution path using project rules and evidence. Project tools assist execution; their scenario coverage does not define the scope of permitted routine nonproduction work. Keep technical safety checks and production controls intact.
 
 ## Hard Boundary
 
-Do not run server writes, deploy, push, release, restart, or environment mutation unless the user explicitly authorized the exact bounded plan in the current turn. One clear approval of a displayed plan authorizes every listed step whose environment, target ref, host, service, and action remain unchanged; do not split push, build, deploy, restart, and verification into repeated approval prompts. If a premise in the user's approval is later proven false, such as assuming `master` already contains a fix, the approval is stale and must be renewed. A `deployer` role is not authorization.
+For confirmed pre/test work, a clear request such as “上预发验证” authorizes the ordinary project-scoped integration, build, deployment, necessary restart and verification. Default to the project's shared pre/test branch unless explicitly directed otherwise. Wrapper use is optional; do not turn missing wrapper capability into a prerequisite repair project. Check the actual host, application directory and service before direct SSH. Keep destructive/data operations, conflicting use, unknown targets and production outside this routine permission. Finish the task's own source changes and temporary worktrees; preserve unrelated work.
+
+Production writes require explicit approval of the bounded plan and the controlled wrapper. One clear approval authorizes every listed step whose environment, target ref, host, service, and action remain unchanged; do not split push, build, deploy, restart, and verification into repeated approval prompts. If a premise in the user's approval is later proven false, such as assuming `master` already contains a fix, stop and resolve it. A `deployer` role is not authorization.
 
 Hooks are fallback validators. They must not become the normal prompt layer or force the user to repeat a SHA, machine token, English action verb, or an already displayed target.
 
@@ -26,11 +28,12 @@ Fast lanes default to the main agent and no subagent. Use `deployer`, `reviewer`
 
 ## Procedure
 
-1. Use the project-specific predeploy/deploy skill or planner first.
-2. Before asking for authorization, use read-only checks to establish the shared-environment owner or conflicting validation, controlled-tool support for checkout/build/restart, target ref and expected SHA, service, rollback, and verification steps.
-3. Present one bounded end-to-end plan. Ask once if its lane, target, conflict handling, tooling change, rollback, verification, or authorization is ambiguous.
+1. Use applicable project guidance and available tooling; a dedicated planner is optional for routine pre/test work. When absent or unsuitable, use the project's existing scripts or standard commands within the same boundaries, without creating a prerequisite tooling project.
+   Confirm it supports this project before invoking it; never run a hardcoded aiserver planner for a different project. An SSH host can serve multiple application directories/services. Select the full project target, preserve other targets, and do not repoint an existing application's mapping to serve another one.
+2. Reuse current evidence or make targeted read-only checks to establish the target, shared-environment conflicts, available build/restart path, rollback and verification. For production, verify the controlled wrapper supports the required actions; do not substitute a direct write path.
+3. For clear routine pre/test requests, give a short progress update and execute; do not add a mandatory plan/confirmation round. Ask once only if target, conflict handling, destructive scope or authorization is genuinely ambiguous. Production retains the bounded end-to-end approval plan.
 4. Execute all listed steps under that approval without asking again. A short affirmative reply such as `按照规划推进` or `推吧` binds to the immediately preceding exact plan.
-5. Stop and ask again only when the environment, protected target, deployed SHA, service, write capability, or action set materially changes. Do not silently chase a moving shared branch; freeze the resolved SHA or report the drift.
+5. Stop for material scope changes or conflicts. A newly produced pre/test integration SHA within the approved task is not itself a new approval requirement. Do not silently chase unrelated changes on a moving shared branch; freeze the resolved SHA and check drift before applying.
 6. Treat checkout-only as a write: it changes what the next restart will run. For production, checkout-only of a non-`master` ref needs the same explicit exception as an immediate deploy/restart.
 7. If a subagent returns evidence, consume it; recheck only a representative sample and record why.
 

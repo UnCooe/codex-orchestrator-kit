@@ -1,0 +1,33 @@
+{
+  "version": "aiserver-ops-critical-gate-v1",
+  "server_policy": {
+    "environment_aliases": {
+      "prod": ["prod", "production", "正式", "生产", "线上"],
+      "pre": ["pre", "staging", "预发", "预发布"],
+      "test": ["test", "testing", "测试"]
+    },
+    "action_aliases": {
+      "deploy": ["deploy", "部署", "发布", "上线"],
+      "restart": ["restart", "重启", "重启服务"],
+      "git": ["git", "更新代码", "拉取代码", "切换分支"]
+    },
+    "hosts": {
+      "test": {
+        "env": "test",
+        "aliases": ["aiserver-test", "aiserver-test-codex"],
+        "services": ["aiserver_test"]
+      },
+      "pre": {
+        "env": "pre",
+        "aliases": ["aiserver-pre", "aiserver-pre-codex"],
+        "services": ["aiserver"]
+      }
+    },
+    "prodctl": {
+      "required_for_envs": ["prod"],
+      "preferred_for_envs": ["pre", "test"],
+      "read_actions": ["status", "version", "plan-deploy", "plan-config"],
+      "write_actions": ["deploy", "restart", "restart-service", "apply-config"]
+    }
+  }
+}

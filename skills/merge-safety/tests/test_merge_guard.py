@@ -827,8 +827,9 @@ def test_prepare_protected_sync_freezes_checked_head_to_master_push(tmp_path):
     )
 
     assert code == 0, payload
-    assert payload["push_command"] == "git push origin HEAD:master"
+    assert payload["push_command"] == shlex.join(["git", "-C", str(repo.resolve()), "push", "origin", "HEAD:master"])
     assert payload["forbidden_actions"] == ["deploy", "restart", "force-push", "server-mutation"]
+    assert payload["promotion_command"].endswith("--target master --execute")
     state = json.loads((repo / ".codex-local" / "merge-safety" / "current.json").read_text(encoding="utf-8"))
     assert state["operation"] == "push"
     assert state["target_ref"] == "master"
@@ -836,6 +837,110 @@ def test_prepare_protected_sync_freezes_checked_head_to_master_push(tmp_path):
     assert state["validated_ref"] == "feature"
     assert state["last_post_check"]["ok"] is True
     assert state["lineage_proof"]["validated_in_result"]["ok"] is True
+
+
+def test_prepare_protected_sync_push_command_quotes_checked_root_with_spaces(tmp_path):
+    repo = tmp_path / "repo with space"
+    init_repo(repo)
+    base_branch = current_branch(repo)
+    run(["git", "branch", "-m", base_branch, "master"], repo)
+    run(["git", "checkout", "-b", "feature/sync"], repo)
+    commit_file(repo, "README.md", "base\nfeature\n", "feature change")
+    run(["git", "checkout", "-b", "integration", "master"], repo)
+    run(["git", "merge", "--no-ff", "feature/sync", "-m", "merge feature"], repo)
+
+    code, payload = guard(
+        "prepare-protected-sync",
+        "--cwd",
+        str(repo),
+        "--target-ref",
+        "master",
+        "--source-ref",
+        "HEAD",
+        "--validated-ref",
+        "feature/sync",
+        "--test",
+        "focused tests passed",
+        "--review",
+        "reviewed; no P1-now",
+        "--push-auth",
+        "sync checked result to master only; no deploy or restart",
+    )
+
+    assert code == 0, payload
+    assert payload["checked_root"] == str(repo.resolve())
+    assert payload["push_command"] == shlex.join(["git", "-C", str(repo.resolve()), "push", "origin", "HEAD:master"])
+    assert payload["promotion_command"].endswith("--target master --execute")
+
+
+def assert_prepare_protected_sync_remote_tracking_target_pushes_to_heads_master(tmp_path, target_ref: str):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    base_branch = current_branch(repo)
+    run(["git", "branch", "-m", base_branch, "master"], repo)
+    run(["git", "update-ref", "refs/remotes/origin/master", "master"], repo)
+    run(["git", "checkout", "-b", "feature"], repo)
+    commit_file(repo, "README.md", "base\nfeature\n", "feature change")
+    run(["git", "checkout", "-b", "integration", "master"], repo)
+    run(["git", "merge", "--no-ff", "feature", "-m", "merge feature"], repo)
+
+    code, payload = guard(
+        "prepare-protected-sync",
+        "--cwd",
+        str(repo),
+        "--target-ref",
+        target_ref,
+        "--source-ref",
+        "HEAD",
+        "--validated-ref",
+        "feature",
+        "--test",
+        "focused tests passed",
+        "--review",
+        "reviewed; no P1-now",
+        "--push-auth",
+        "sync checked result to master only; no deploy or restart",
+    )
+
+    assert code == 0, payload
+    assert payload["target_ref"] == target_ref
+    assert payload["push_command"] == shlex.join(
+        ["git", "-C", str(repo.resolve()), "push", "origin", "HEAD:refs/heads/master"]
+    ), payload["push_command"]
+    state = json.loads((repo / ".codex-local" / "merge-safety" / "current.json").read_text(encoding="utf-8"))
+    assert state["target_ref"] == target_ref
+
+
+def test_prepare_protected_sync_origin_master_pushes_to_remote_heads_master(tmp_path):
+    assert_prepare_protected_sync_remote_tracking_target_pushes_to_heads_master(tmp_path, "origin/master")
+
+
+def test_prepare_protected_sync_refs_remotes_origin_master_pushes_to_remote_heads_master(tmp_path):
+    assert_prepare_protected_sync_remote_tracking_target_pushes_to_heads_master(tmp_path, "refs/remotes/origin/master")
+
+
+def test_bash_hook_command_scopes_git_dash_c_to_checked_root_not_payload_cwd(tmp_path):
+    checked = tmp_path / "checked repo"
+    unrelated = tmp_path / "unrelated repo"
+    init_repo(checked)
+    init_repo(unrelated)
+    init_intent(checked)
+    (unrelated / "README.md").write_text("dirty unrelated\n", encoding="utf-8")
+
+    command = shlex.join(["git", "-C", str(checked.resolve()), "merge", "--no-commit", "HEAD"])
+    payload = {
+        "cwd": str(unrelated),
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    }
+
+    code, result = guard("hook-pretool", input_payload=payload)
+
+    assert code == 0
+    assert result["should_block"] is False, result
+    assert result["checked_root"] == str(checked.resolve())
+    assert result["root_source"] == "git.invocation"
+    assert result["dirty_classification"] == "tool_state_only"
 
 
 def test_prepare_protected_sync_rejects_deploy_or_restart_scope(tmp_path):
@@ -1078,6 +1183,21 @@ class MergeGuardTests(unittest.TestCase):
 
     def test_check_lineage_blocks_validated_ref_not_returned_to_feature(self):
         self.run_tmp_test(test_check_lineage_blocks_validated_ref_not_returned_to_feature)
+
+    def test_prepare_protected_sync_freezes_checked_head_to_master_push(self):
+        self.run_tmp_test(test_prepare_protected_sync_freezes_checked_head_to_master_push)
+
+    def test_prepare_protected_sync_push_command_quotes_checked_root_with_spaces(self):
+        self.run_tmp_test(test_prepare_protected_sync_push_command_quotes_checked_root_with_spaces)
+
+    def test_prepare_protected_sync_origin_master_pushes_to_remote_heads_master(self):
+        self.run_tmp_test(test_prepare_protected_sync_origin_master_pushes_to_remote_heads_master)
+
+    def test_prepare_protected_sync_refs_remotes_origin_master_pushes_to_remote_heads_master(self):
+        self.run_tmp_test(test_prepare_protected_sync_refs_remotes_origin_master_pushes_to_remote_heads_master)
+
+    def test_bash_hook_command_scopes_git_dash_c_to_checked_root_not_payload_cwd(self):
+        self.run_tmp_test(test_bash_hook_command_scopes_git_dash_c_to_checked_root_not_payload_cwd)
 
     def test_hotfix_like_intent_requires_explicit_user_flag(self):
         self.run_tmp_test(test_hotfix_like_intent_requires_explicit_user_flag)
