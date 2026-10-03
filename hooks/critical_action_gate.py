@@ -1215,7 +1215,7 @@ def _ssh_invocations(command: str) -> list[tuple[str, str]]:
         index = 1
         while index < len(tokens):
             token = tokens[index]
-            if token.startswith("-"):
+            if not host and token.startswith("-"):
                 if token in {"-i", "-p", "-l", "-o", "-F", "-J"} and index + 1 < len(tokens):
                     index += 2
                     continue
@@ -1224,6 +1224,13 @@ def _ssh_invocations(command: str) -> list[tuple[str, str]]:
             if not host:
                 host = token
             else:
+                # Redirections after the SSH payload are evaluated by the
+                # local shell. Their file operands are not remote targets.
+                if (
+                    token.startswith(("<", ">", "&>"))
+                    or re.match(r"^\d+(?:<|>|>>|<&|>&)", token)
+                ):
+                    break
                 remote_parts.append(token)
             index += 1
         if host:
@@ -1231,13 +1238,14 @@ def _ssh_invocations(command: str) -> list[tuple[str, str]]:
     return invocations
 
 
-def _is_remote_copy_write(command: str) -> bool:
-    """Return true when scp/rsync's destination operand is remote."""
+def _remote_copy_write_destinations(command: str) -> list[tuple[str, str]]:
+    """Return the remote destinations of ordinary scp/rsync uploads."""
+    destinations: list[tuple[str, str]] = []
     try:
         merge_guard = _load_merge_guard()
     except Exception:
         merge_guard = None
-    remote_operand = re.compile(r"^(?:[^/@:\s]+@)?[A-Za-z0-9_.-]+:{1,2}.+")
+    remote_operand = re.compile(r"^(?:[^/@:\s]+@)?(?P<host>[A-Za-z0-9_.-]+):(?P<path>/.*)$")
     for statement in _candidate_statements(command, merge_guard):
         try:
             tokens = _strip_transparent_prefixes(shlex.split(statement, posix=True))
@@ -1245,15 +1253,24 @@ def _is_remote_copy_write(command: str) -> bool:
             continue
         if not tokens or Path(tokens[0]).name not in {"scp", "rsync"}:
             continue
+        operands, uncertain = _option_operands(
+            tokens[1:],
+            value_options={"-F", "-i", "-J", "-l", "-o", "-P", "-S", "-e", "--rsh", "--rsync-path"},
+        )
+        if uncertain or not operands:
+            continue
         # For both tools the final positional operand is the destination.
-        # A trailing option is malformed and will fail in the tool itself; it
-        # must not be mistaken for a remote write.
-        destination = tokens[-1]
+        destination = operands[-1]
         if destination == "--" or destination.startswith("-"):
             continue
-        if remote_operand.match(destination):
-            return True
-    return False
+        match = remote_operand.fullmatch(destination)
+        if match:
+            destinations.append((match.group("host"), match.group("path")))
+    return destinations
+
+
+def _is_remote_copy_write(command: str) -> bool:
+    return bool(_remote_copy_write_destinations(command))
 
 
 def _strip_transparent_prefixes(tokens: list[str]) -> list[str]:
@@ -1448,7 +1465,7 @@ def _remote_write_actions(remote: str) -> list[str]:
         actions.append("restart")
     if re.search(r"(?<![A-Za-z0-9_-])touch\s+", lower):
         actions.append("touch")
-    if re.search(r"(?<![A-Za-z0-9_-])(?:rm|unlink)\s+", lower):
+    if re.search(r"(?<![A-Za-z0-9_-])(?:rmdir|rm|unlink)\s+", lower):
         actions.append("remove")
     if re.search(r"(?<![A-Za-z0-9_-])mkdir\s+", lower):
         actions.append("mkdir")
@@ -1583,6 +1600,13 @@ def _strip_remote_prefixes(tokens: list[str]) -> list[str]:
             current = current[index:]
             changed = True
             continue
+        if Path(current[0]).name == "sudo":
+            # Only the option-free form is transparent. Other sudo forms can
+            # change identity or execution behavior and stay unclassified.
+            if len(current) > 1 and not current[1].startswith("-"):
+                current = current[1:]
+                changed = True
+                continue
     return current
 
 
@@ -1790,7 +1814,7 @@ def _remote_command_write_targets(tokens: list[str]) -> tuple[list[str], bool]:
         return _option_operands(args, value_options={"-d", "--date", "-r", "--reference", "-t"})
     if command == "mkdir":
         return _option_operands(args, value_options={"-m", "--mode", "-Z", "--context"})
-    if command in {"rm", "unlink"}:
+    if command in {"rm", "rmdir", "unlink"}:
         return _option_operands(args)
     if command == "chmod":
         operands, uncertain = _option_operands(args, value_options={"--reference"})
@@ -1963,15 +1987,152 @@ def _pretest_nonroutine_git_reason(remote: str, env: str) -> str:
     return ""
 
 
-def _pretest_routine_ssh_actions(actions: list[str], remote: str, env: str) -> bool:
-    if not actions or not set(actions).issubset({"build", "git", "restart"}):
+def _pretest_runtime_tee_targets(remote: str, allowed_dirs: list[Any]) -> bool:
+    """Allow an option-free tee only for fresh nonproduction runtime artifacts."""
+    roots = _normalized_allowed_app_dirs(allowed_dirs)
+    cwd = ""
+    saw_tee = False
+    for segment in _remote_shell_segments(remote):
+        try:
+            tokens = _strip_remote_prefixes(shlex.split(segment, posix=True))
+        except ValueError:
+            return False
+        if not tokens:
+            continue
+        cd = _remote_cd_target(tokens)
+        if cd:
+            cwd = _posix_normalize_remote_path(cd, cwd) or ""
+            continue
+        actions = _remote_write_actions(segment)
+        if "edit" not in actions:
+            continue
+        if Path(tokens[0]).name != "tee":
+            return False
+        # Shell tokenization keeps a no-space `>/dev/null` next to tee as an
+        # argument. It is only an output sink, not another file target.
+        tee_args = [arg for arg in tokens[1:] if not re.fullmatch(r"(?:\d+)?>{1,2}/dev/null", arg)]
+        if any(arg.startswith("-") for arg in tee_args):
+            return False
+        targets, uncertain = _remote_command_write_targets([tokens[0], *tee_args])
+        if uncertain or not targets:
+            return False
+        for target in targets:
+            normalized = _posix_normalize_remote_path(target, cwd)
+            if not normalized or not any(normalized.startswith(root.rstrip("/") + "/.runtime/") for root in roots):
+                return False
+        saw_tee = True
+    return saw_tee
+
+
+def _pretest_runtime_cleanup_targets(remote: str, allowed_dirs: list[Any]) -> bool:
+    """Allow explicit cleanup only inside one nonproduction task runtime directory."""
+    roots = _normalized_allowed_app_dirs(allowed_dirs)
+    cwd = ""
+    saw_cleanup = False
+    for segment in _remote_shell_segments(remote):
+        try:
+            tokens = _strip_remote_prefixes(shlex.split(segment, posix=True))
+        except ValueError:
+            return False
+        if not tokens:
+            continue
+        cd = _remote_cd_target(tokens)
+        if cd:
+            cwd = _posix_normalize_remote_path(cd, cwd) or ""
+            continue
+        command = Path(tokens[0]).name
+        if command not in {"rm", "rmdir", "unlink"}:
+            continue
+        targets, uncertain = _remote_command_write_targets(tokens)
+        if uncertain or not targets or any(token.startswith("-") or any(char in token for char in "*?[") for token in tokens[1:]):
+            return False
+        for target in targets:
+            normalized = _posix_normalize_remote_path(target, cwd)
+            matching_root = next((root for root in roots if normalized and normalized.startswith(root.rstrip("/") + "/.runtime/")), None)
+            if not matching_root:
+                return False
+            relative = normalized[len(matching_root.rstrip("/") + "/.runtime/") :]
+            parts = [part for part in relative.split("/") if part]
+            # A run directory makes cleanup task-scoped. `rm` must not remove
+            # the run directory itself; `rmdir` may remove it only when empty.
+            if not parts or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{7,}", parts[0]):
+                return False
+            if command in {"rm", "unlink"} and len(parts) < 2:
+                return False
+        saw_cleanup = True
+    return saw_cleanup
+
+
+def _pretest_routine_ssh_actions(actions: list[str], remote: str, env: str, allowed_dirs: list[Any]) -> bool:
+    if not actions or not set(actions).issubset({"build", "git", "restart", "touch", "mkdir", "chmod", "edit", "remove"}):
+        return False
+    if "edit" in actions and not _pretest_runtime_tee_targets(remote, allowed_dirs):
+        return False
+    if "remove" in actions and not _pretest_runtime_cleanup_targets(remote, allowed_dirs):
         return False
     git_invocations = _remote_git_invocations(remote)
     if "git" in actions:
         return bool(git_invocations) and all(
             _pretest_routine_git_invocation(subcommand, args, env) for subcommand, args in git_invocations
         )
-    return not git_invocations
+    return all(_pretest_readonly_git_probe(subcommand, args, env) for subcommand, args in git_invocations)
+
+
+def _pretest_filesystem_risk(remote: str, allowed_dirs: list[Any]) -> str:
+    """Technical checks only; approval wording cannot waive these risks."""
+    actions = set(_remote_write_actions(remote))
+    if actions & {"chown", "symlink"}:
+        return "deletion, ownership or symlink mutation needs a scoped safety review; repeating authorization cannot waive this boundary"
+    if "remove" in actions and not _pretest_runtime_cleanup_targets(remote, allowed_dirs):
+        return "deletion outside an explicit task .runtime directory needs a scoped safety review"
+    cwd = ""
+    roots = _normalized_allowed_app_dirs(allowed_dirs)
+    for segment in _remote_shell_segments(remote):
+        try:
+            tokens = _strip_remote_prefixes(shlex.split(segment, posix=True))
+        except ValueError:
+            return "cannot determine filesystem mutation bounds"
+        if not tokens:
+            continue
+        cd = _remote_cd_target(tokens)
+        if cd:
+            cwd = _posix_normalize_remote_path(cd, cwd) or ""
+            continue
+        targets, _ = _remote_command_write_targets(tokens)
+        targets += _redirection_targets(segment)[0]
+        if any(_posix_normalize_remote_path(target, cwd) in roots for target in targets):
+            return "mutation of the application root itself needs a scoped safety review"
+        command, args = Path(tokens[0]).name, tokens[1:]
+        if command == "chmod":
+            if len(args) < 2 or not re.fullmatch(r"0?[0-7]{3}", args[0]):
+                return "recursive, symbolic or special permission changes need a scoped safety review"
+            if int(args[0], 8) & 0o002 or any(arg.startswith("-") for arg in args[1:]):
+                return "world-writable or option-bearing permission changes need a scoped safety review"
+        if command in {"install", "mkdir"}:
+            mode = _option_value_from_tokens(args, {"-m", "--mode"})
+            if mode and (not re.fullmatch(r"0?[0-7]{3}", mode) or int(mode, 8) & 0o002):
+                return "special or world-writable creation mode needs a scoped safety review"
+            if command == "install" and any(arg in {"-o", "-g", "--owner", "--group"} or arg.startswith(("--owner=", "--group=")) for arg in args):
+                return "ownership changes need a scoped safety review"
+    return ""
+
+
+def _handle_nonprod_remote_copy(policy: dict[str, Any], transcript_text: Callable[[], str], command: str) -> tuple[bool, str]:
+    destinations = _remote_copy_write_destinations(command)
+    if not destinations:
+        return True, ""
+    for host, target in destinations:
+        host_policy = _server_policy(policy, host)
+        env = str(host_policy.get("env") or "").lower()
+        if env not in {"pre", "test"}:
+            return False, "remote scp/rsync writes are limited to registered pre/test hosts"
+        if _current_text_denies_server_action(transcript_text(), ["copy"]):
+            return False, f"{env} file transfer conflicts with the current stop/restriction"
+        normalized = _posix_normalize_remote_path(target, "/")
+        roots = _normalized_allowed_app_dirs(list(host_policy.get("allowed_app_dirs") or []))
+        if not normalized or not any(normalized.startswith(root.rstrip("/") + "/.runtime/") for root in roots):
+            return False, f"{env} file transfer must target a configured application .runtime directory"
+    return True, ""
 
 
 def _current_text_denies_server_action(text: str, actions: list[str], *, transport: str = "") -> bool:
@@ -1993,7 +2154,16 @@ def _current_text_denies_server_action(text: str, actions: list[str], *, transpo
         "build": ("build", "构建", "编译"),
         "git": ("git", "deploy", "部署", "发布", "上线", "更新代码", "拉取代码", "切换分支"),
         "restart": ("restart", "重启", "reload", "启动", "停止"),
+        "mkdir": ("mkdir", "创建目录", "建目录"),
+        "touch": ("touch", "创建", "新建"),
+        "chmod": ("chmod", "权限"),
+        "copy": ("copy", "cp", "复制"),
+        "move": ("move", "mv", "移动"),
+        "edit": ("edit", "write", "写入", "修改"),
+        "install": ("install", "安装"),
     }
+    if normalized.strip(" ，。！？,.!?") in {"停止", "暂停", "先停下", "先等等", "只读排查", "仅只读", "只读"}:
+        return True
     if any(denied_near(action_terms.get(action, (action,))) for action in actions):
         return True
     return denied_near(("execute", "执行", "计划"))
@@ -2064,18 +2234,18 @@ def _handle_ssh(
             nonroutine_git_reason = _pretest_nonroutine_git_reason(remote, env)
             if nonroutine_git_reason:
                 return False, f"{env} SSH write to {host} {nonroutine_git_reason}"
-            if _pretest_routine_ssh_actions(actions, remote, env) and not _current_text_denies_server_action(
+            if _current_text_denies_server_action(
                 transcript_text(),
                 actions,
                 transport="ssh",
             ):
+                return False, f"{env} SSH mutation conflicts with the current stop/restriction"
+            risk = _pretest_filesystem_risk(remote, list(host_policy.get("allowed_app_dirs") or []))
+            if risk:
+                return False, f"{env} SSH write to {host}: {risk}"
+            if _pretest_routine_ssh_actions(actions, remote, env, list(host_policy.get("allowed_app_dirs") or [])):
                 continue
-            action_ok = all(_action_authorized(policy, transcript, action) for action in actions)
-            env_ok = _text_has_alias(transcript, _aliases(policy, "env", env))
-            host_ok = _host_authorized(policy, host, host_policy, transcript) or env_ok
-            services_ok = all(service.lower() in transcript for service in services)
-            if not (env_ok and host_ok and action_ok and services_ok):
-                return False, f"{env} SSH write to {host} requires current-turn semantic authorization"
+            return False, f"{env} SSH operation has unresolved technical bounds; inspect the operation instead of requesting approval keywords"
     return True, ""
 
 
@@ -2179,6 +2349,7 @@ def _handle_prodctl(
     policy: dict[str, Any],
     server_transcript_text: Callable[..., str],
     command: str,
+    current_user_text: Callable[[], str] | None = None,
 ) -> tuple[bool, str]:
     read_only = {"plan", "plan-deploy", "status", "show", "inspect", "check", "validate", "dry-run"}
     mutating_actions = {
@@ -2211,11 +2382,15 @@ def _handle_prodctl(
         if env in {"prod", "pre", "test"}:
             service = _option_value(args, "--service")
             ref = _option_value(args, "--ref")
-            if env in {"pre", "test"} and _option_value(args, "--approval-token"):
+            if env in {"pre", "test"}:
                 allowed_services = {str(item).lower() for item in (host_policy.get("services") or [])}
-                if host_policy and (not service or service.lower() in allowed_services):
-                    # The controlled prodctl client already carries the bounded
-                    # plan token. Do not make the user restate a pre/test plan.
+                if host_policy and service and service.lower() not in allowed_services:
+                    return False, f"{env} prodctl target/service is outside configured bounds"
+                if host_policy:
+                    if current_user_text and _current_text_denies_server_action(current_user_text(), ["git" if action == "deploy" else action]):
+                        return False, f"{env} prodctl mutation conflicts with the current stop/restriction"
+                    # The Agent owns user intent; the client/server validates plans.
+                    # Presence of an arbitrary token is not authorization evidence.
                     continue
             transcript = server_transcript_text(
                 environment=env,
@@ -2358,9 +2533,6 @@ def main() -> int:
     command = _command(payload)
     if not RISK_CANDIDATE_RE.search(command):
         return _allow()
-    if _is_remote_copy_write(command):
-        return _block("remote scp/rsync writes are blocked; use the controlled prodctl/server wrapper")
-
     policy = _load_policy(payload)
     transcript_context_cache: AuthorizationContext | None = None
 
@@ -2386,6 +2558,10 @@ def main() -> int:
     def server_transcript_text(**scope: Any) -> str:
         return _server_authorization_text(policy, transcript_context(), **scope)
 
+    ok, reason = _handle_nonprod_remote_copy(policy, transcript_text, command)
+    if not ok:
+        return _block(reason)
+
     try:
         merge_guard = _load_merge_guard()
     except MergeGuardNotFound as exc:
@@ -2398,7 +2574,7 @@ def main() -> int:
             next_action="Install merge-safety into CODEX_HOME/skills or AGENTS_HOME/skills, then rerun the command.",
         )
 
-    ok, reason = _handle_prodctl(policy, server_transcript_text, command)
+    ok, reason = _handle_prodctl(policy, server_transcript_text, command, lambda: transcript_context().current_user_text)
     if not ok:
         return _block(reason)
     ok, reason = _handle_ssh(policy, transcript_text, server_transcript_text, command)

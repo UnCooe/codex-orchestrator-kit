@@ -37,7 +37,7 @@ When no exact project-specific owner is already selected, choose the narrowest w
 - Feature, bugfix, refactor, or test changes: `../feature-workflow/SKILL.md`. New feature work defaults to a feature branch from latest `origin/master`; follow-up edits must stay on the matching feature branch unless the user explicitly authorizes another branch.
 - Review, audit, diff or PR inspection, or risk assessment: `../review-workflow/SKILL.md`.
 - Merge, rebase, cherry-pick, pull, branch sync, or conflict resolution: `../merge-workflow/SKILL.md`.
-- Pre or staging work, deploy, rollback, or restart: `../predeploy-workflow/SKILL.md`; deployer requires current-turn authorization.
+- Pre or staging work, deploy, rollback, or restart: `../predeploy-workflow/SKILL.md`; reuse existing authorization within unchanged pre/test scope; production requires approval of the bounded plan.
 
 Read the selected leaf skill completely before any task action. Load that file directly; do not emit `$leaf` and wait for a second automatic injection. Do not pre-read, pre-load, bulk read, batch read, or read all sibling workflow skills. For mixed tasks, route and execute phase by phase with exactly one mutation owner in the same phase; a merge phase may subsequently load merge safety as required by the merge owner. Fail closed on missing or unreadable skill paths, report the exact path, and stop. If the user explicitly names a leaf skill, bypass selection and load that leaf directly. `tiny_direct` loads no leaf skill. Broad research stays orchestrator-owned and should be coordinated through a researcher; external `$codebase-research` is optional when it fits the request.
 
@@ -110,7 +110,7 @@ Role examples:
 - Use `researcher` when the code path is unknown, crosses modules, or needs source-backed mapping before implementation.
 - Use `test_writer` only when test files, fixtures, or test helpers need to be added or changed.
 - Use `critic` for high-risk architecture, migrations, broad refactors, deployment risk, or explicitly requested destructive critique.
-- Use `deployer` for predeploy/deploy only after current-turn authorization.
+- Use `deployer` for authorized predeploy/deploy work; unchanged pre/test scope does not need repeated authorization.
 - `conflict_resolver` resolves merge conflicts only and does not satisfy ordinary implementation work.
 
 Branch boundary:

@@ -19,7 +19,7 @@ Hooks are fallback validators. They must not become the normal prompt layer or f
 
 ## Lane Routing
 
-- `fast_pre`: low-risk pre/staging validation, checkout/reset to a known ref, pull/restart, rollback, or restart-only.
+- `fast_pre`: low-risk pre/staging validation, non-destructive shared-branch synchronization, rollback, or restart-only. Reset/discard operations require a separate data-loss assessment.
 - `fast_hotfix`: urgent shared-target action with rollback, authorization, and bounded verification. By default, deploy the latest fetched `master` while using `expected_head` only as a drift guard; use an exact commit SHA only when the user explicitly asks for a pinned/detached SHA deploy or emergency exception.
 - `shared_lane`: merge or push a shared branch such as `pre` or `master`, conflict work, or lineage-sensitive handoff.
 - `controlled_ops`: config/env/schema/table/external-service, production-like, data-loss, restart-order, monitoring, or rollback-behavior risk.

@@ -880,12 +880,12 @@ class CriticalActionGateContractTests(unittest.TestCase):
             self.assertEqual(blocked.get("decision"), "block")
             self.assertIn("prodctl", str(blocked.get("reason", "")).lower())
 
-    def test_pre_and_test_filesystem_mutations_require_matching_current_turn_semantics(self) -> None:
+    def test_pre_and_test_bounded_filesystem_work_needs_no_keyword_approval(self) -> None:
         cases = (
             (
                 "pre",
-                "ssh app-pre-1 'cd /srv/example-app && cp runtime.conf runtime.conf.bak'",
-                "direct SSH to pre host app-pre-1 and copy /srv/example-app/runtime.conf to runtime.conf.bak",
+                "ssh app-pre-1 'cd /srv/example-app && mkdir -p .runtime/backup'",
+                "允许，继续推进吧",
             ),
             (
                 "test",
@@ -895,13 +895,12 @@ class CriticalActionGateContractTests(unittest.TestCase):
         )
 
         for env_name, command, user_text in cases:
-            with self.subTest(env=env_name, state="missing_authorization"):
+            with self.subTest(env=env_name, state="agent_owns_authorization"):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     root = Path(temp_dir)
                     blocked = _run_gate(_payload(command, cwd=root))
 
-                    self.assertEqual(blocked.get("decision"), "block")
-                    self.assertIn("current-turn", str(blocked.get("reason", "")).lower())
+                    self.assertEqual(blocked.get("decision"), "allow")
 
             with self.subTest(env=env_name, state="matching_authorization"):
                 with tempfile.TemporaryDirectory() as temp_dir:
@@ -1004,48 +1003,28 @@ class CriticalActionGateContractTests(unittest.TestCase):
             self.assertEqual(dev_null.get("decision"), "allow")
             self.assertTrue(dev_null.get("silent"), dev_null)
 
-    def test_pre_and_test_bounded_file_writes_require_matching_current_turn_direct_ssh_semantics(self) -> None:
+    def test_pre_and_test_bounded_directory_preparation_does_not_require_keywords(self) -> None:
         cases = (
             (
                 "pre",
-                "ssh app-pre-1 'cd /srv/example-app && touch runtime.flag'",
-                "direct SSH to pre host app-pre-1 and touch /srv/example-app/runtime.flag",
-                "direct SSH to test host app-pre-1 and touch /srv/example-app/runtime.flag",
+                "ssh app-pre-1 'cd /srv/example-app && mkdir -p .runtime/probe && chmod 0755 .runtime/probe'",
             ),
             (
                 "test",
-                "ssh app-test-1 'cd /srv/example-app && sed -i.bak s/old/new/ runtime.conf'",
-                "direct SSH to test host app-test-1 and edit /srv/example-app/runtime.conf with sed -i",
-                "direct SSH to test host app-test-1 and touch /srv/example-app/runtime.conf",
+                "ssh app-test-1 'cd /srv/example-app && touch .runtime/probe.flag'",
             ),
         )
 
-        for env_name, command, exact_text, mismatch_text in cases:
-            with self.subTest(env=env_name, state="missing_authorization"):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    root = Path(temp_dir)
-                    blocked = _run_gate(_payload(command, cwd=root))
-
-                    self.assertEqual(blocked.get("decision"), "block")
-                    self.assertIn("current-turn", str(blocked.get("reason", "")).lower())
-
-            with self.subTest(env=env_name, state="matching_authorization"):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    root = Path(temp_dir)
-                    transcript = _write_transcript(root, exact_text)
-                    allowed = _run_gate(_payload(command, cwd=root, transcript_path=str(transcript)))
-
-                    self.assertEqual(allowed.get("decision"), "allow")
-                    self.assertTrue(allowed.get("silent"), allowed)
-
-            with self.subTest(env=env_name, state="mismatched_authorization"):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    root = Path(temp_dir)
-                    transcript = _write_transcript(root, mismatch_text)
-                    blocked = _run_gate(_payload(command, cwd=root, transcript_path=str(transcript)))
-
-                    self.assertEqual(blocked.get("decision"), "block")
-                    self.assertIn("current-turn", str(blocked.get("reason", "")).lower())
+        for env_name, command in cases:
+            for user_text in ("", "允许，继续推进吧", "继续"):
+                with self.subTest(env=env_name, user_text=user_text or "none"):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        root = Path(temp_dir)
+                        payload = _payload(command, cwd=root)
+                        if user_text:
+                            payload["transcript_path"] = str(_write_transcript(root, user_text))
+                        allowed = _run_gate(payload)
+                        self.assertEqual(allowed.get("decision"), "allow")
 
     def test_pre_and_test_absolute_writes_outside_app_dir_remain_blocked_after_allowed_cd(self) -> None:
         cases = (
@@ -1208,8 +1187,12 @@ class CriticalActionGateContractTests(unittest.TestCase):
                         )
                     )
 
-                    self.assertEqual(allowed.get("decision"), "allow")
-                    self.assertTrue(allowed.get("silent"), allowed)
+                    if env_name == "prod":
+                        self.assertEqual(allowed.get("decision"), "allow")
+                        self.assertTrue(allowed.get("silent"), allowed)
+                    else:
+                        self.assertEqual(allowed.get("decision"), "block")
+                        self.assertIn("symlink", str(allowed.get("reason", "")).lower())
 
             outside_sources = (
                 (
@@ -1313,7 +1296,7 @@ class CriticalActionGateContractTests(unittest.TestCase):
                     result = _run_gate(_payload(command, cwd=root, transcript_path=str(transcript)))
 
                     self.assertEqual(result.get("decision"), "block", result)
-                    self.assertIn("current-turn", str(result.get("reason", "")).lower())
+                    self.assertIn("stop/restriction", str(result.get("reason", "")).lower())
 
     def test_configured_pre_and_test_nonroutine_git_reset_does_not_use_routine_ssh_shortcut(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2533,7 +2516,7 @@ supervisorctl restart aiserver'"""
                     self.assertEqual(result.get("decision"), "allow", result)
                     self.assertTrue(result.get("silent"), result)
 
-    def test_approved_deploy_plan_that_excludes_restart_cannot_authorize_restart(self) -> None:
+    def test_pre_plan_text_does_not_become_a_second_authorization_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             transcript = _write_transcript_records(
@@ -2555,9 +2538,9 @@ supervisorctl restart aiserver'"""
                 )
             )
 
-            self.assertEqual(result.get("decision"), "block")
+            self.assertEqual(result.get("decision"), "allow")
 
-    def test_adjacent_deploy_plan_with_explicit_ref_cannot_authorize_a_different_ref(self) -> None:
+    def test_pre_hook_does_not_parse_a_planned_ref_as_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             transcript = _write_transcript_records(
@@ -2579,9 +2562,9 @@ supervisorctl restart aiserver'"""
                 )
             )
 
-            self.assertEqual(result.get("decision"), "block")
+            self.assertEqual(result.get("decision"), "allow")
 
-    def test_adjacent_deploy_plan_with_named_ref_cannot_authorize_a_different_ref(self) -> None:
+    def test_pre_hook_does_not_parse_a_named_ref_as_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             transcript = _write_transcript_records(
@@ -2603,7 +2586,7 @@ supervisorctl restart aiserver'"""
                 )
             )
 
-            self.assertEqual(result.get("decision"), "block", result)
+            self.assertEqual(result.get("decision"), "allow", result)
 
     def test_adjacent_deploy_plan_with_named_ref_authorizes_that_exact_ref(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2629,7 +2612,7 @@ supervisorctl restart aiserver'"""
 
             self.assertEqual(result.get("decision"), "allow", result)
 
-    def test_adjacent_plan_cannot_authorize_a_different_host_in_the_same_environment(self) -> None:
+    def test_pre_hook_allows_another_registered_pre_host(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             policy = json.loads(POLICY.read_text(encoding="utf-8"))
@@ -2658,7 +2641,7 @@ supervisorctl restart aiserver'"""
                 )
             )
 
-            self.assertEqual(result.get("decision"), "block")
+            self.assertEqual(result.get("decision"), "allow")
 
     def test_configured_pre_routine_ssh_can_restart_multiple_configured_services_without_repeated_language(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2831,126 +2814,19 @@ supervisorctl restart aiserver'"""
             self.assertEqual(result.get("decision"), "allow")
             self.assertTrue(result.get("silent"), result)
 
-    def test_adjacent_plan_approval_blocks_without_current_positive_exact_single_plan(self) -> None:
-        exact_plan = "Plan: restart aiserver on pre host app-pre-1 using prodctl only."
-        cases = (
-            (
-                "no_current_user_approval",
-                [_message("user", "先给计划"), _message("assistant", exact_plan)],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "assistant_only_plan_text",
-                [_message("user", "只检查状态"), _message("assistant", exact_plan)],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "negative_do_not_restart",
-                [_message("user", "先给计划"), _message("assistant", exact_plan), _message("user", "不要重启")],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "negative_do_not_execute_yet",
-                [_message("user", "先给计划"), _message("assistant", exact_plan), _message("user", "先别执行")],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "negative_short_do_not_restart",
-                [_message("user", "先给计划"), _message("assistant", exact_plan), _message("user", "好，别重启")],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "negative_contrast_do_not_restart",
-                [_message("user", "先给计划"), _message("assistant", exact_plan), _message("user", "可以，但别重启")],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "question_is_not_approval",
-                [_message("user", "先给计划"), _message("assistant", exact_plan), _message("user", "允许吗？")],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "request_for_more_plan_detail_is_not_approval",
-                [_message("user", "先给计划"), _message("assistant", exact_plan), _message("user", "可以说说重启计划吗？")],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "stale_non_adjacent_plan",
-                [
-                    _message("user", "先给计划"),
-                    _message("assistant", exact_plan),
-                    _message("user", "等一下"),
-                    _message("assistant", "I checked status only; no restart plan is active."),
-                    _message("user", "可以，按上述计划执行"),
-                ],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-            (
-                "multiple_conflicting_plans",
-                [
-                    _message("user", "先给计划"),
-                    _message(
-                        "assistant",
-                        "Plan A: restart aiserver on pre host app-pre-1. Plan B: deploy billing on test host app-test-1.",
-                    ),
-                    _message("user", "可以，按上述计划执行"),
-                ],
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "matching",
-            ),
-            (
-                "command_mismatch",
-                [_message("user", "先给计划"), _message("assistant", exact_plan), _message("user", "可以，按上述计划执行")],
-                "./prodctl restart-service --host app-test-1 --service aiserver",
-                "matching",
-            ),
-        )
-
-        for case_name, records, command, reason_marker in cases:
-            with self.subTest(case=case_name):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    root = Path(temp_dir)
-                    policy_path = _write_aiserver_policy(root)
+    def test_pre_prodctl_does_not_reparse_plans_as_user_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            policy_path = _write_aiserver_policy(root)
+            for records, expected in (
+                ([_message("user", "先给计划"), _message("assistant", "Plan: restart aiserver on pre host app-pre-1 using prodctl only.")], "allow"),
+                ([_message("user", "不要重启")], "block"),
+                ([_message("user", "只检查状态，不要执行")], "block"),
+            ):
+                with self.subTest(records=records):
                     transcript = _write_transcript_records(root, records)
-
-                    result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path), transcript_path=str(transcript)))
-
-                    self.assertEqual(result.get("decision"), "block")
-                    self.assertIn(reason_marker, str(result.get("reason", "")).lower())
-
-    def test_negated_adjacent_plan_scope_still_blocks_prodctl_semantic_authorization(self) -> None:
-        cases = (
-            (
-                "negated_service",
-                "Plan: do not restart aiserver; restart billing only on pre host app-pre-1 using prodctl.",
-                "./prodctl restart-service --host app-pre-1 --service aiserver",
-                "current-turn",
-            ),
-        )
-
-        for case_name, plan, command, reason_marker in cases:
-            with self.subTest(case=case_name):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    root = Path(temp_dir)
-                    policy_path = _write_aiserver_policy(root)
-                    transcript = _write_transcript_records(
-                        root,
-                        [_message("user", "先给计划"), _message("assistant", plan), _message("user", "可以，按上述计划执行")],
-                    )
-
-                    result = _run_gate(_payload(command, cwd=root, policy_path=str(policy_path), transcript_path=str(transcript)))
-
-                    self.assertEqual(result.get("decision"), "block")
-                    self.assertIn(reason_marker, str(result.get("reason", "")).lower())
+                    result = _run_gate(_payload("./prodctl restart-service --host app-pre-1 --service aiserver", cwd=root, policy_path=str(policy_path), transcript_path=str(transcript)))
+                    self.assertEqual(result.get("decision"), expected)
 
     def test_no_policy_pre_and_test_raw_ssh_writes_fail_closed(self) -> None:
         commands = (
@@ -2996,7 +2872,7 @@ supervisorctl restart aiserver'"""
                     )
 
                     self.assertEqual(result.get("decision"), "block")
-                    self.assertIn("current-turn", str(result.get("reason", "")).lower())
+                    self.assertIn("stop/restriction", str(result.get("reason", "")).lower())
 
     def test_current_exact_single_message_english_prodctl_restart_authorization_still_allows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3210,7 +3086,7 @@ supervisorctl restart aiserver'"""
                     self.assertEqual(result.get("decision"), "allow")
                     self.assertTrue(result.get("silent"), result)
 
-    def test_prodctl_pre_and_test_mutations_use_semantic_authorization_without_user_plan_id(self) -> None:
+    def test_prodctl_pre_and_test_technical_bounds_without_keyword_approval(self) -> None:
         cases = (
             (
                 "./prodctl deploy --host app-pre-1 --plan-id internal-pre-123",
@@ -3232,8 +3108,7 @@ supervisorctl restart aiserver'"""
                     root = Path(temp_dir)
 
                     blocked = _run_gate(_payload(command, cwd=root))
-                    self.assertEqual(blocked.get("decision"), "block")
-                    self.assertIn("current-turn", str(blocked.get("reason", "")).lower())
+                    self.assertEqual(blocked.get("decision"), "allow")
 
                     transcript = _write_transcript(root, user_text)
                     allowed = _run_gate(_payload(command, cwd=root, transcript_path=str(transcript)))
